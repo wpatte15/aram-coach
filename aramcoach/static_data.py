@@ -165,7 +165,10 @@ class StaticData:
         for key, r in raw.items():
             iid = int(key)
             gold = r["gold"]
-            text = clean_html(r.get("description", ""))
+            # Keep the difference between effects that work by themselves and ones that need a button press.
+            marked = re.sub(r"<active>(.*?)</active>", r"PRESS-TO-USE \1:", r.get("description", ""), flags=re.S)
+            marked = re.sub(r"<passive>(.*?)</passive>", r"Passive \1:", marked, flags=re.S)
+            text = clean_html(marked).replace(":;", ":")
             plain = (r.get("plaintext") or "").strip()
             self.items[iid] = {
                 "id": iid,

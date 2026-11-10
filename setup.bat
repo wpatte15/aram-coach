@@ -21,5 +21,10 @@ if not exist ".env" (
   echo Created .env. Open it and choose how the coach reaches Claude.
 )
 
+if not exist "player.txt" (
+  copy /y "player.example.txt" "player.txt" >nul
+  echo Created player.txt. Open it and describe how you play, so the coach matches its advice to you.
+)
+
 echo.
 echo Setup is complete. Run start.bat to start the coach, or "start.bat --demo" to try it without a game.

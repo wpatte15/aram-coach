@@ -33,6 +33,21 @@ def _setting(name: str, default: str = "") -> str:
 CACHE_DIR = ROOT / "cache"        # downloaded game data and generated prompt files
 CAPTURE_DIR = ROOT / "captures"   # raw game API payloads, one folder per game
 LOG_FILE = ROOT / "logs" / "coach.log"
+PLAYER_FILE = ROOT / "player.txt"   # the player's own description of their skill; see player.example.txt
+
+_DEFAULT_PLAYER = ("I am new to League of Legends. The number of items and augments is overwhelming, and I do not "
+                   "know what most items do or why one is better than another.")
+
+
+def player_profile() -> str:
+    """What the player says about themselves. Read on every request, so edits apply without a restart."""
+    try:
+        text = PLAYER_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    return text[:2000] or _DEFAULT_PLAYER
+
+
 WEB_DIR = PKG_DIR / "web"
 
 # The game serves this on loopback only while a match is running.

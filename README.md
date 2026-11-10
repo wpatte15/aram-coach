@@ -43,6 +43,20 @@ The key is read from `.env` by this app only. Do not set `ANTHROPIC_API_KEY` as 
 
 `.env` is listed in `.gitignore`. Never commit it.
 
+## Tell the coach how you play
+
+`player.txt` is your own description of your skill, in plain sentences. The coach reads it on every request and coaches the player you describe, not a better one. `setup.bat` creates it from `player.example.txt`.
+
+Say which champions you understand, what you do on the rest, and whether you press item buttons. For example:
+
+```
+Champions I understand reasonably well: Blitzcrank, Thresh.
+On every other champion I mostly click on enemies and press my abilities whenever they are ready.
+I never press item buttons, so do not count on me using them.
+```
+
+With that, the coach values items by their stats and passive effects only, avoids items whose worth is mostly a button, prefers augments that work by themselves, gives at most three simple rules on a champion you do not know, and judges which fights you can take by your execution. Edits take effect on the next plan; no restart is needed. The file is ignored by git.
+
 ## Run
 
 ```
@@ -77,6 +91,23 @@ Measured with Claude Opus 5.5 at low effort and an API key, in a 20-minute five-
 - A whole match costs roughly $1 to $1.50.
 
 `ARAMCOACH_SPEED=fast` makes plans about 2.5 times quicker for twice the price.
+
+### Choosing a model
+
+Set `ARAMCOACH_MODEL` and `ARAMCOACH_EFFORT` in `.env`. These figures come from the same five moments of one real match, so treat them as a guide, not a benchmark.
+
+| Model and effort | Full plan | Build order visible | Cost per plan | Plans read closely |
+|---|---|---|---|---|
+| `claude-opus-5-5`, `low` (default) | 19 s | 8 s | $0.07 | No mistakes found |
+| `claude-sonnet-5-5`, `medium` | 14 s | 5.5 s | $0.03 | Builds sound; fight-alone estimates too optimistic |
+| `claude-sonnet-5-5`, `low` | 12 s | 3.5 s | $0.03 | About one game-knowledge slip per plan |
+| `claude-haiku-5-5`, `low` | 17 s | 11 s | under $0.01 | Mistakes in most plans; not recommended |
+
+Examples of the slips: Sonnet at low effort put two burn items in one build although their effects do not combine, and told the player to sell an item that cannot be sold. Haiku listed an item as owned that the player did not have.
+
+Sonnet roughly halves the cost of a match. Opus is the default because the player this was built for follows the plan literally and cannot catch a wrong instruction.
+
+Raising Opus above `low` effort did not pay off on three of those moments. Medium took 31 seconds per plan and high took 36, against 21 at low, for 17% and 29% more cost. The builds were the same or differed only in the last two items. A plan that takes over 30 seconds arrives after most respawn timers have run out.
 
 ## Settings
 

@@ -11,3 +11,6 @@ __pycache__/
 cache/
 captures/
 logs/
+
+# Your own description of how you play (see player.example.txt)
+player.txt
