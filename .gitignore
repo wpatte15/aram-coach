@@ -1,0 +1,13 @@
+# Secrets and per-machine settings
+.env
+
+# Python environment and bytecode
+.venv/
+__pycache__/
+*.pyc
+
+# Downloaded game data, recordings of your own matches, and logs.
+# Recordings contain other players' names: do not commit them.
+cache/
+captures/
+logs/

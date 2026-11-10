@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARAM Coach</title>
+<style>
+  :root {
+    --bg: #0d1016; --panel: #161a22; --line: #252b36; --text: #e7eaf0; --dim: #8b94a5;
+    --gold: #e9c46a; --accent: #53c1ff; --good: #55d08f; --bad: #ff7272; --warn: #ffb454;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, "Segoe UI", sans-serif; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 12px 16px 40px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 56px; }
+  .who { display: flex; align-items: center; gap: 12px; }
+  .who img { width: 48px; height: 48px; border-radius: 8px; }
+  .who b { font-size: 18px; }
+  .gold { color: var(--gold); font-variant-numeric: tabular-nums; }
+  .dim { color: var(--dim); }
+  .pill { padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); font-size: 13px; white-space: nowrap; }
+  .pill.live { color: var(--good); border-color: #2c5a44; }
+  .pill.busy { color: var(--accent); border-color: #2a5672; }
+  h1 { font-size: 22px; line-height: 1.3; margin: 14px 0; font-weight: 650; }
+  h2 { font-size: 12px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim); margin: 0 0 10px; font-weight: 600; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 12px 0; }
+  .card.open { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .card.open h2 { color: var(--accent); }
+  .card p { margin: 8px 0 0; }
+  ul, ol { list-style: none; margin: 0; padding: 0; }
+  small { display: block; color: var(--dim); font-size: 13px; font-weight: 400; }
+  .buys li { display: flex; align-items: center; gap: 12px; padding: 6px 0; font-size: 19px; font-weight: 600; }
+  .buys img { width: 44px; height: 44px; border-radius: 6px; border: 1px solid var(--line); }
+  .buys .nm { flex: 1; }
+  .build li { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+  .build img { width: 34px; height: 34px; border-radius: 5px; border: 1px solid var(--line); }
+  .build .nm { flex: 1; min-width: 0; }
+  .mark { width: 76px; text-align: right; font-size: 12px; color: var(--dim); }
+  .build li.done { opacity: .5; }
+  .build li.done .mark { color: var(--good); }
+  .build li.buy .mark, .build li.next .mark { color: var(--accent); }
+  .play li { padding: 5px 0 5px 18px; position: relative; font-size: 17px; }
+  .play li::before { content: ""; position: absolute; left: 2px; top: 15px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .threats li, .duels li { display: flex; gap: 12px; padding: 7px 0; }
+  .threats img, .duels img { width: 36px; height: 36px; border-radius: 6px; flex: none; }
+  .threats .ans { color: var(--good); display: block; }
+  .chip { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; margin: 0 6px; border: 1px solid; }
+  .chip.good { color: var(--good); } .chip.warn { color: var(--warn); } .chip.bad { color: var(--bad); }
+  .pick { font-size: 22px; }
+  .pick b { color: var(--accent); }
+  .offers li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line); }
+  .offers li:first-child { margin-top: 10px; }
+  .team { display: grid; grid-template-columns: 1fr; gap: 4px; }
+  .team .row { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+  .team img.c { width: 26px; height: 26px; border-radius: 6px; flex: none; }
+  .team .row.dead { opacity: .45; }
+  .team .nm { width: 108px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .team .kda { width: 92px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .team .it img { width: 22px; height: 22px; border-radius: 3px; margin-right: 2px; vertical-align: middle; }
+  .team h3 { font-size: 13px; margin: 10px 0 4px; color: var(--dim); font-weight: 600; }
+  .aug { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 12px; margin: 2px 4px 2px 0; border: 1px solid #5a4d24; color: var(--gold); }
+  .aug.miss { color: var(--dim); border: 1px dashed var(--line); }
+  .team .augs { flex: 1; }
+  .team .count { width: 52px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .flash { color: var(--good); font-weight: 600; }
+  form { display: flex; gap: 8px; }
+  input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; font: inherit; }
+  button { background: var(--line); color: var(--text); border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor: pointer; white-space: nowrap; }
+  button:hover { background: #303846; }
+  button:disabled { opacity: .5; cursor: default; }
+  #answer { white-space: pre-wrap; }
+  .err { color: var(--bad); border-color: #5b2b2b; }
+  .note { border-color: #4b4424; color: var(--gold); }
+  .idle { text-align: center; padding: 48px 20px; color: var(--dim); font-size: 18px; }
+  .idle b { color: var(--text); font-size: 22px; }
+  footer { color: var(--dim); font-size: 13px; display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; }
+  footer .btns { display: flex; gap: 8px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="who" id="who"></div>
+    <div class="pill" id="pill">Connecting</div>
+  </header>
+
+  <div class="card err" id="err" hidden></div>
+  <div class="idle" id="idle">Connecting to the coach.</div>
+  <section class="card" id="debrief" hidden></section>
+
+  <main id="live" hidden>
+    <div class="card note" id="note" hidden></div>
+    <section class="card open" id="screen" hidden></section>
+    <h1 id="headline"></h1>
+    <section class="card" id="buy"></section>
+    <section class="card" id="tracker" hidden></section>
+    <section class="card" id="build" hidden></section>
+    <section class="card" id="play" hidden></section>
+    <section class="card" id="scaling" hidden></section>
+    <section class="card" id="duels" hidden></section>
+    <section class="card" id="threats" hidden></section>
+    <section class="card">
+      <h2>Ask the coach</h2>
+      <form id="askform">
+        <input id="q" maxlength="500" autocomplete="off" placeholder="For example: why that item and not Zhonya's?">
+        <button id="askbtn">Ask</button>
+      </form>
+      <p id="answer" hidden></p>
+    </section>
+    <section class="card" id="teams"></section>
+    <footer><span id="meta"></span><span class="btns"><button id="readscreen">Read my screen</button><button id="refresh">Update plan</button></span></footer>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const clock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const num = n => Number(n).toLocaleString("en-US");
+const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+let ver = "";
+const itemImg = id => `https://ddragon.leagueoflegends.com/cdn/${ver}/img/item/${id}.png`;
+const champImg = id => id ? `https://ddragon.leagueoflegends.com/cdn/${ver}/img/champion/${id}.png` : "";
+
+// Only touch the DOM when a section's content changes, so images do not flicker on every poll.
+const shown = {};
+function set(id, html) { if (shown[id] !== html) { shown[id] = html; $(id).innerHTML = html; } }
+function show(id, on) { $(id).hidden = !on; }
+
+function pill(v) {
+  const el = $("pill");
+  let text = "Waiting for a game", cls = "pill";
+  if (v.status === "loading") text = "Game loading";
+  if (v.status !== "live" && v.pregame && v.pregame.status === "planning") { text = "Planning…"; cls = "pill busy"; }
+  if (v.status === "live") { text = `${v.game.mode} · ${v.game.ended ? "game over" : clock(v.game.time)}`; cls = "pill live"; }
+  if (v.status === "live" && v.thinking) { text = "Updating plan…"; cls = "pill busy"; }
+  el.className = cls; el.textContent = text;
+}
+
+function idleHtml(v) {
+  const p = v.pregame;
+  if (!p) return v.status === "loading" ? "The game is loading. The panel fills in when the match starts."
+    : "Waiting for a game.<br>Start an ARAM match and this panel fills in when it loads.";
+  let h = p.champion ? `<b>${esc(p.champion)}</b><br>` : "";
+  if (p.status === "planning") h += "Making your plan. This takes a few seconds.";
+  if (p.status === "ready") h += `${esc(p.headline)}<br><span class="dim">Build: ${esc((p.build || []).join(", then "))}</span>`;
+  if (p.item_set) h += `<br><span class="gold">Item set "${esc(p.item_set)}" is in your in-game shop.</span>`;
+  if (p.status === "ready" && p.enemies_known) h += `<br><span class="dim">The full plan is ready for when you load in.</span>`;
+  if (p.error) h += `<br><span style="color:var(--bad)">${esc(p.error)}</span>`;
+  return h;
+}
+
+function debriefHtml(d) {
+  const list = (items, cls) => `<ul class="play ${cls}">` + items.map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`;
+  let h = `<h2>Review of your last game: ${esc(d.champion)}, ${d.win ? "win" : "loss"}, ${d.minutes} minutes</h2><p>${esc(d.verdict)}</p>`;
+  if ((d.went_well || []).length) h += `<p class="dim">What went well</p>` + list(d.went_well, "");
+  if ((d.to_fix || []).length) h += `<p class="dim">What to do differently</p>` + list(d.to_fix, "");
+  if (d.build_review) h += `<p class="dim">Your build</p><p>${esc(d.build_review)}</p>`;
+  if (d.focus_next_game) h += `<p class="pick" style="font-size:18px">Next game: <b>${esc(d.focus_next_game)}</b></p>`;
+  const augments = Object.entries(d.augments || {}).filter(([, a]) => a.length);
+  if (augments.length) h += `<p class="dim">Augments everyone had</p>` + augments.map(([c, a]) => `<small><b>${esc(c)}</b>: ${esc(a.join(", "))}</small>`).join("");
+  return h;
+}
+
+function screenHtml(v) {
+  const s = v.screen || {};
+  if (s.busy) return `<h2>Reading your screen</h2><p class="dim">Looking at the game. This takes a few seconds.</p>`;
+  if (!s.kind || s.age > 240) return "";
+  if (s.kind !== "augment_choice")
+    return `<h2>${s.kind === "error" ? "Could not read the screen" : "On your screen"}</h2><p>${esc(s.why)}</p>`;
+  const wanted = s.wanted || [];
+  let h = `<h2>Augment choice</h2>`;
+  if (s.pick) h += `<p class="pick">Take <b>${esc(s.pick)}</b></p><p>${esc(s.why)}</p>`;
+  else if (s.choosing) h += `<p class="pick">${wanted.length ? `Your plan wanted <b>${esc(wanted.join(" or "))}</b>` : "Choosing…"}</p><p class="dim">The full answer takes a few seconds.</p>`;
+  else h += `<p>${esc(s.why || "No pick.")}</p>`;
+  if (s.reroll) h += `<p class="gold">${esc(s.reroll)}</p>`;
+  if (s.note) h += `<p class="dim">${esc(s.note)}</p>`;
+  h += `<ul class="offers">` + s.offered.map(o => {
+    const took = s.taken === o.name;
+    const side = took ? `<span class="mark">${s.assumed ? "assumed taken" : "taken"}</span>`
+      : `<button data-augment="${esc(o.name)}">${s.taken ? "I took this instead" : "I took this"}</button>`;
+    return `<li><div><b>${esc(o.name)}</b>${o.tier ? ` <span class="dim">${esc(o.tier)}</span>` : ""}${wanted.includes(o.name) ? ` <span class="gold">in your plan</span>` : ""}<small>${esc(o.summary)}</small></div>${side}</li>`;
+  }).join("") + `</ul>`;
+  h += `<p class="dim">${s.taken ? (s.assumed ? "The coach assumes you took its pick. Tap another card if you took that one." : "") : "Tap the one you took, so the coach plans around it."}</p>`;
+  return h;
+}
+
+function buyHtml(v) {
+  const b = v.buy_now;
+  if (!b) return `<h2>What to buy</h2><p class="dim">${v.thinking ? "Working out your build for this game. This takes a few seconds." : "No plan yet."}</p>`;
+  let h = `<h2>${b.shop_open ? "Shop is open: buy these now" : "Buy these the next time you die"}</h2>`;
+  if (b.purchases.length) {
+    h += `<ul class="buys">` + b.purchases.map(p =>
+      `<li><img src="${itemImg(p.id)}" alt=""><span class="nm">${esc(p.name)}${p.toward !== p.name ? `<small>part of ${esc(p.toward)}</small>` : ""}</span><span class="gold">${num(p.cost)}</span></li>`
+    ).join("") + `</ul><p class="dim">Costs ${num(b.spend)} gold, leaves ${num(b.left)}.</p>`;
+  } else if (b.complete) {
+    h += `<p>Your build is complete. Nothing more to buy.</p>`;
+  } else {
+    h += `<p>Nothing to buy yet. Keep your gold.</p>`;
+  }
+  if (b.next) h += `<p class="dim">${b.purchases.length ? "After that, " : ""}<b>${esc(b.next.name)}</b> needs ${num(b.next.short)} more gold.</p>`;
+  if (v.advice.next_item_why) h += `<p>${esc(v.advice.next_item_why)}</p>`;
+  return h;
+}
+
+const MARKS = { done: "owned", buy: "buy now", next: "in progress", todo: "" };
+function buildHtml(v) {
+  return `<h2>Your build, in order</h2><ol class="build">` + v.build.map(b =>
+    `<li class="${b.status}"><img src="${itemImg(b.id)}" alt=""><span class="nm">${esc(b.name)}<small>${esc(b.why)}</small>${b.in_set === false && b.status !== "done" ? `<small class="gold">Not in your in-game item set. Type its name in the shop search.</small>` : ""}</span><span class="mark">${MARKS[b.status] || ""}</span></li>`
+  ).join("") + `</ol>` + (v.advice.changed ? `<p class="gold">Plan changed: ${esc(v.advice.changed)}</p>` : "");
+}
+
+function playHtml(v) {
+  return `<h2>How to play this game</h2><ul class="play">` + (v.advice.how_to_play || []).map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`
+    + (v.advice.skill_order ? `<p class="dim">Ability order: ${esc(v.advice.skill_order)}</p>` : "");
+}
+
+function scalingHtml(v) {
+  const s = v.advice.scaling || {};
+  if (!s.goal) return "";
+  let h = `<h2>How you take over the game</h2><p>${esc(s.goal)}</p>`;
+  if ((s.power_spikes || []).length) h += `<ul class="play">` + s.power_spikes.map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`;
+  if ((s.augments_to_look_for || []).length) h += `<p class="dim">Augments to take if offered:</p><ul class="play">` + s.augments_to_look_for.map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`;
+  return h;
+}
+
+const enemyIds = v => Object.fromEntries(v.teams.enemies.map(p => [p.champion, p.champ_id]));
+const VERDICTS = { favored: ["you win", "good"], even: ["even", "warn"], avoid: ["avoid", "bad"] };
+function duelsHtml(v) {
+  const ids = enemyIds(v);
+  return `<h2>Can you fight them alone? Estimates</h2><ul class="duels">` + (v.advice.duels || []).map(d => {
+    const [label, cls] = VERDICTS[d.verdict] || VERDICTS.even;
+    return `<li>${ids[d.champion] ? `<img src="${champImg(ids[d.champion])}" alt="">` : ""}<div><b>${esc(d.champion)}</b><span class="chip ${cls}">${label}</span>Fight when: ${esc(d.fight_when)}<small>${esc(d.why)}</small></div></li>`;
+  }).join("") + `</ul>`;
+}
+
+function threatsHtml(v) {
+  const ids = enemyIds(v);
+  return `<h2>Watch out for</h2><ul class="threats">` + (v.advice.threats || []).map(t =>
+    `<li>${ids[t.champion] ? `<img src="${champImg(ids[t.champion])}" alt="">` : ""}<div><b>${esc(t.champion)}</b> ${esc(t.danger)}<span class="ans">${esc(t.answer)}</span></div></li>`
+  ).join("") + `</ul>`;
+}
+
+function trackerHtml(t) {
+  const row = p => {
+    const missing = Math.max(0, p.possible - p.known.length);
+    const chips = p.known.map(n => `<span class="aug">${esc(n)}${p.assumed.includes(n) ? " (assumed)" : ""}</span>`).join("")
+      + Array(missing).fill(`<span class="aug miss">not captured</span>`).join("");
+    return `<div class="row"><img class="c" src="${champImg(p.champ_id)}" alt=""><span class="nm">${esc(p.champion)}</span><span class="count">${p.known.length} of ${p.possible}</span><span class="augs">${chips || `<span class="dim">none yet at this level</span>`}</span></div>`;
+  };
+  const group = (title, side) => {
+    const players = t.players.filter(p => p.side === side);
+    return players.length ? `<h3>${title}</h3>` + players.map(row).join("") : "";
+  };
+  let h = `<h2>Augments captured: ${t.known} of up to ${t.possible}</h2>`;
+  if (t.last && t.last.age < 15) h += `<p class="flash">Just captured: ${esc(t.last.name)} ${t.last.owner ? `for ${esc(t.last.owner)}` : "(could not tell whose it is)"}</p>`;
+  h += `<div class="team">${group("Enemies", "enemy")}${group("Your team", "ally")}${group("You", "you")}</div>`;
+  if (t.unowned.length) h += `<p class="dim">Read but not matched to a player: ${esc(t.unowned.join(", "))}. Point at it again with the mouse on that player's row.</p>`;
+  h += `<p class="dim">To capture one: hold Tab and rest the mouse on an augment icon for half a second. "Up to" counts by level, so a player may not have picked their latest one yet.</p>`;
+  return h;
+}
+
+function teamHtml(title, players) {
+  if (!players.length) return "";
+  return `<h3>${title}</h3>` + players.map(p =>
+    `<div class="row${p.dead ? " dead" : ""}"><img class="c" src="${champImg(p.champ_id)}" alt=""><span class="nm">${esc(p.champion)}</span><span class="kda">Lv ${p.level} · ${p.kda.join("/")}</span><span class="it">${p.items.map(i => `<img src="${itemImg(i.id)}" title="${esc(i.name)}" alt="">`).join("")}</span></div>`
+  ).join("");
+}
+
+function render(v) {
+  ver = v.version;
+  pill(v);
+  show("err", !!v.error); if (v.error) $("err").textContent = v.error;
+  const live = v.status === "live";
+  show("idle", !live); show("live", live);
+  show("debrief", !live && !!v.debrief);
+  if (!live) { set("who", ""); set("idle", idleHtml(v)); if (v.debrief) set("debrief", debriefHtml(v.debrief)); return; }
+
+  const me = v.me;
+  set("who", me ? `<img src="${champImg(me.champ_id)}" alt=""><div><b>${esc(me.champion)}</b> · Level ${me.level}<br><span class="gold">${num(me.gold)} gold</span> <span class="dim">· ${me.kda.join("/")}${me.dead ? ` · dead, back in ${me.respawn}s` : ""}</span>${(v.my_augments || []).length ? `<small>Your augments: ${esc(v.my_augments.map(a => (v.assumed_augments || []).includes(a) ? a + " (assumed)" : a).join(", "))}</small>` : ""}</div>` : "");
+
+  const notes = [];
+  if (!v.game.is_aram) notes.push("This is not an ARAM map. The coach only knows the ARAM shop, so its advice may be off.");
+  if (v.augment_fields && v.augment_fields.length) notes.push("Augment data found in the game API: " + v.augment_fields.slice(0, 6).join(", "));
+  show("note", notes.length > 0); set("note", notes.map(esc).join("<br>"));
+
+  const screenCard = screenHtml(v);
+  show("screen", !!screenCard); set("screen", screenCard);
+
+  const a = v.advice;
+  set("headline", a ? esc(a.headline) : "");
+  $("buy").className = "card" + (v.buy_now && v.buy_now.shop_open ? " open" : "");
+  set("buy", buyHtml(v));
+  const has = key => !!a && (a[key] || []).length > 0;
+  show("build", !!a); show("play", has("how_to_play")); show("duels", has("duels")); show("threats", has("threats"));
+  if (a) { set("build", buildHtml(v)); set("play", playHtml(v)); set("duels", duelsHtml(v)); set("threats", threatsHtml(v)); }
+  const scalingCard = a ? scalingHtml(v) : "";
+  show("scaling", !!scalingCard); set("scaling", scalingCard);
+  set("teams", `<h2>Scoreboard</h2><div class="team">${teamHtml("Enemies", v.teams.enemies)}${teamHtml("Your team", v.teams.allies)}</div>`);
+  show("tracker", !!v.augment_tracker);
+  if (v.augment_tracker) set("tracker", trackerHtml(v.augment_tracker));
+  $("readscreen").textContent = `Read my screen (${v.hotkey})`;
+
+  const m = v.meta;
+  const spend = v.spend && v.spend.billed ? ` This game: ${v.spend.calls} Claude calls, $${v.spend.cost.toFixed(2)}.` : "";
+  $("meta").textContent = !m ? `${v.model}. Game data ${v.version}.${spend}`
+    : m.partial ? "Build order is in. The rest of the plan is arriving."
+    : `Plan from ${clock(m.game_time)} game time, ${m.age}s ago (${m.trigger}). ${v.model}${m.latency ? `, ${m.latency}s` : ""}.${spend}`;
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    render(await r.json());
+  } catch (e) {
+    $("pill").className = "pill"; $("pill").textContent = "Coach is not running";
+  }
+}
+
+$("refresh").addEventListener("click", () => post("/api/refresh"));
+$("readscreen").addEventListener("click", () => post("/api/screen"));
+$("screen").addEventListener("click", e => {
+  const name = e.target.dataset && e.target.dataset.augment;
+  if (name) post("/api/augment", { name });
+});
+$("askform").addEventListener("submit", async e => {
+  e.preventDefault();
+  const q = $("q").value.trim();
+  if (!q) return;
+  const ans = $("answer"), btn = $("askbtn");
+  btn.disabled = true; ans.hidden = false; ans.className = "dim"; ans.textContent = "Thinking…";
+  try {
+    const d = await (await post("/api/ask", { question: q })).json();
+    ans.className = d.error ? "err" : ""; ans.textContent = d.error || d.answer;
+  } catch (err) {
+    ans.className = "err"; ans.textContent = "Could not reach the coach.";
+  }
+  btn.disabled = false;
+});
+
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
