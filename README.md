@@ -23,7 +23,7 @@ It is built for players who find the number of items and augments overwhelming. 
 
 ## Setup
 
-1. Download or clone this repository.
+1. Download this repository: on its GitHub page choose Code, then Download ZIP, and unzip it. Or clone it with git.
 2. Double-click `setup.bat`. It creates a private Python environment in `.venv`, installs the packages, and creates a `.env` file.
 3. Open `.env` in a text editor and choose how the coach reaches Claude.
 
@@ -132,7 +132,7 @@ Estimated enemy stats come from base stats, level and item stat lines. They leav
 | Items, champion text, base stats | Riot Data Dragon |
 | Attack damage growth, ability numbers by rank | Meraki Analytics community dataset. Can lag a patch |
 | Augment ids and names | CommunityDragon |
-| Augment descriptions | League of Legends Wiki. A copy is bundled in `aramcoach/data` |
+| Augment descriptions | League of Legends Wiki. A copy is bundled in `aramcoach/data` under CC BY-SA 3.0; see the note in that folder |
 
 ## Tests
 
