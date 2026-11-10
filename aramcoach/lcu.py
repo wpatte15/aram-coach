@@ -1,8 +1,9 @@
 """Read-only access to the League client (LCU) API.
 
 The client writes a `lockfile` with its port and password while it is running. This module
-is used only to label the queue (for example "ARAM: Mayhem"). Every function returns
-None when the client is not reachable.
+only reads: the client's phase, champion select, the two teams, the queue, and the match
+history. It never sends a command to the client. Every function returns None when the
+client is not reachable.
 """
 from __future__ import annotations
 
@@ -75,6 +76,68 @@ def champ_select():
     return (mine, mates) if mine else None
 
 
+_PRIVATE = ("puuid", "summonerid", "gamename", "tagline", "internalname", "chatdetails", "jwt")
+
+
+def _scrub(node):
+    """Copy of a client payload without other players' identities or chat credentials."""
+    if isinstance(node, dict):
+        return {k: _scrub(v) for k, v in node.items() if not any(word in k.lower() for word in _PRIVATE)}
+    if isinstance(node, list):
+        return [_scrub(v) for v in node]
+    return node
+
+
+def champ_options():
+    """What the player can choose from in champion select, or None outside it.
+
+    ARAM gives each player two champion cards (sometimes three); the ones not taken go to a
+    bench the whole team can swap from. Returns {mine, mates, bench, cards, phase, raw}:
+    champion numbers, the timer phase, and the session itself with identities removed.
+
+    `benchChampions` is a field of the session. The cards are taken from the client's
+    "subset champion list", which its own type definitions tie to the session flag
+    `allowSubsetChampionPicks`. That reading comes from the definitions, not from a watched
+    champion select, so `raw` is kept to check it against a real one. Cards are reported
+    only while the choice between them is still open: once one of them is on the bench or
+    with a teammate, or the player holds a champion that was not a card, the bench is the
+    whole list.
+    """
+    session = get("/lol-champ-select/v1/session", timeout=2)
+    if not isinstance(session, dict):
+        return None
+    cell = session.get("localPlayerCellId")
+    mine, mates = 0, []
+    for p in session.get("myTeam") or []:
+        key = p.get("championId") or 0
+        if p.get("cellId") == cell:
+            mine = key
+        elif key:
+            mates.append(key)
+    bench = [b.get("championId") for b in session.get("benchChampions") or []
+             if isinstance(b, dict) and b.get("championId")]
+    subset = get("/lol-lobby-team-builder/champ-select/v1/subset-champion-list", timeout=2) \
+        if session.get("allowSubsetChampionPicks") else None
+    subset = [c for c in subset if isinstance(c, int) and c > 0] if isinstance(subset, list) else []
+    chosen = any(c in bench or c in mates for c in subset) or bool(mine and mine not in subset)
+    raw = _scrub(session)
+    raw["subsetChampionList"] = subset
+    return {"mine": mine, "mates": mates, "bench": bench,
+            "cards": [] if chosen or len(subset) > 6 else [c for c in subset if c != mine],
+            "phase": (session.get("timer") or {}).get("phase"), "raw": raw}
+
+
+def match_history(count: int = 40):
+    """The player's most recent matches from the client, newest first, or None.
+
+    Each entry holds the match's id, mode and length, and the player's own champion and stats.
+    """
+    data = get(f"/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex={count - 1}",
+               timeout=10)
+    games = ((data or {}).get("games") or {}).get("games") if isinstance(data, dict) else None
+    return games if isinstance(games, list) else None
+
+
 def match_teams():
     """Once a match is starting: (my champion number, [allies], [enemies]). None when unavailable.
 
@@ -108,6 +171,15 @@ def finished_game(game_id: int):
     """
     game = get(f"/lol-match-history/v1/games/{game_id}", timeout=10)
     return game if isinstance(game, dict) and game.get("participants") else None
+
+
+def timeline(game_id: int):
+    """Minute-by-minute record of a finished match, or None: every kill with its time and map position.
+
+    The client keeps only the player's last 40 matches, so the coach saves this after each one.
+    """
+    data = get(f"/lol-match-history/v1/game-timelines/{game_id}", timeout=10)
+    return data if isinstance(data, dict) and data.get("frames") else None
 
 
 def my_puuid():

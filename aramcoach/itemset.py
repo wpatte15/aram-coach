@@ -3,12 +3,11 @@
 The game loads item set files from Config\\Global\\Recommended and shows them in the shop's
 item set dropdown. Other companion apps use the same folder.
 
-Whether the game re-reads the file during a match is not known. The safe assumption is that
-it reads it once, when the match loads, so the set written in champion select is built to
-cover what later plans might ask for: the main build, a build per enemy type, and a pool of
-other items that suit the champion. The file is also rewritten whenever the live plan
-changes, with the game time in its title, so one look at the shop shows whether the game
-picked the change up.
+The game reads the file once, when the match loads. A rewrite during the match does not show
+in the shop (tried over several real games). The set written in champion select is therefore
+built to cover what later plans might ask for: the main build, a group per enemy type, a
+group per direction an augment could push the build, and a pool of other items that suit the
+champion.
 """
 from __future__ import annotations
 
@@ -45,15 +44,13 @@ def clear():
         path.unlink(missing_ok=True)
 
 
-def build(sd, champ_id: str, advice: dict, extras: dict | None = None, stamp: str = "") -> dict:
+def build(sd, champ_id: str, advice: dict) -> dict:
     """Item set content for one champion.
 
-    advice: a plan; its build order becomes the main blocks.
-    extras: the champion-select plan's `situational` groups and `pool`. A live plan has
-      neither, so the caller passes the ones from champion select to keep them in the set.
-    stamp: text added to the title, used to show when a live rewrite happened.
+    advice: the champion-select plan. Its build order becomes the main blocks. Its
+      `situational` groups (by enemy type), `augment_builds` groups (by augment direction)
+      and `pool` follow, so that items a later plan names are already in the shop.
     """
-    extras = extras or advice
     order = [b["item_id"] for b in advice["build_order"]]
     start = [p["id"] for p in shop.plan(order, [], START_GOLD, sd.items)["purchases"]]
     blocks = [
@@ -61,15 +58,15 @@ def build(sd, champ_id: str, advice: dict, extras: dict | None = None, stamp: st
         _block("2. Then finish these, left to right", order),
     ]
     listed = set(order)
-    for group in extras.get("situational") or []:
+    for group in (advice.get("situational") or []) + (advice.get("augment_builds") or []):
         if group.get("item_ids"):
             blocks.append(_block(group["title"], group["item_ids"]))
             listed.update(group["item_ids"])
-    pool = [i for i in extras.get("pool") or [] if i not in listed]
+    pool = [i for i in advice.get("pool") or [] if i not in listed]
     if pool:
         blocks.append(_block("Other items the coach may call for", pool))
     return {
-        "title": f"Coach: {extras.get('title') or advice.get('title') or champ_id}" + (f" ({stamp})" if stamp else ""),
+        "title": f"Coach: {advice.get('title') or champ_id}",
         "championKey": champ_id,         # informational: the game shows Global sets for every champion
         "map": "any", "mode": "any", "type": "custom", "priority": True, "sortrank": 1000000001,
         "blocks": blocks,
@@ -81,12 +78,12 @@ def item_ids(item_set: dict) -> list:
     return list(dict.fromkeys(int(entry["id"]) for block in item_set["blocks"] for entry in block["items"]))
 
 
-def write(sd, champ_id: str, advice: dict, extras: dict | None = None, stamp: str = ""):
+def write(sd, champ_id: str, advice: dict):
     """Write the item set file. Returns (path, item set), or (None, None) when League's folder cannot be found."""
     path = _path()
     if path is None:
         return None, None
     path.parent.mkdir(parents=True, exist_ok=True)
-    item_set = build(sd, champ_id, advice, extras, stamp)
+    item_set = build(sd, champ_id, advice)
     path.write_text(json.dumps(item_set, indent=2), encoding="utf-8")
     return path, item_set

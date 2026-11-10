@@ -79,6 +79,7 @@ POLL_SECONDS = 1.0           # how often the game API is read
 UPDATE_WHILE_ALIVE = _setting("ARAMCOACH_UPDATE_WHILE_ALIVE") == "1"
 MIN_ADVICE_INTERVAL = 60.0   # minimum gap between routine plan updates (deaths and manual refreshes skip it)
 DEATH_REFRESH_AFTER = 45.0   # a death asks for a new plan only when the current one is older than this
+DEATH_PLAN_WAIT = 2.0        # in Mayhem, hold a death's plan this long to see whether an augment offer opens
 PERIODIC_REFRESH = 150.0     # refresh the plan this often when the game has moved on
 RETRY_AFTER_ERROR = 30.0     # wait this long after a failed Claude call before trying again
 CAPTURE_EVERY = 30.0         # seconds between raw payload captures

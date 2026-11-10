@@ -61,7 +61,6 @@
   .aug { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 12px; margin: 2px 4px 2px 0; border: 1px solid #5a4d24; color: var(--gold); }
   .aug.miss { color: var(--dim); border: 1px dashed var(--line); }
   .team .augs { flex: 1; }
-  .team .count { width: 52px; color: var(--dim); font-variant-numeric: tabular-nums; }
   .flash { color: var(--good); font-weight: 600; }
   form { display: flex; gap: 8px; }
   input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; font: inherit; }
@@ -86,6 +85,7 @@
   </header>
 
   <div class="card err" id="err" hidden></div>
+  <section class="card open" id="options" hidden></section>
   <div class="idle" id="idle">Connecting to the coach.</div>
   <section class="card" id="debrief" hidden></section>
 
@@ -94,10 +94,11 @@
     <section class="card open" id="screen" hidden></section>
     <h1 id="headline"></h1>
     <section class="card" id="buy"></section>
+    <section class="card" id="deaths" hidden></section>
     <section class="card" id="tracker" hidden></section>
     <section class="card" id="build" hidden></section>
-    <section class="card" id="play" hidden></section>
     <section class="card" id="scaling" hidden></section>
+    <section class="card" id="play" hidden></section>
     <section class="card" id="duels" hidden></section>
     <section class="card" id="threats" hidden></section>
     <section class="card">
@@ -151,10 +152,25 @@ function idleHtml(v) {
   return h;
 }
 
+function optionsHtml(o) {
+  const ease = n => n >= 4 ? "easy for you" : n === 3 ? "takes some care" : "hard for you";
+  const where = {yours: "yours now", card: "your card", bench: "on the bench"};
+  const row = r => {
+    const past = r.games ? `${r.games} game${r.games > 1 ? "s" : ""}, ${r.wins} won, ${r.deaths} deaths a game` : "not played before";
+    return `<li><img src="${champImg(r.champ_id)}" alt=""><div><b>${esc(r.champion)}</b> <span class="dim">${where[r.source] || ""}</span>`
+      + `<small>${ease(r.ease)} · ${esc(r.job)}${r.why ? " · " + esc(r.why) : ""}</small>`
+      + `<small class="dim">${past}${r.need ? " · " + esc(r.need) : ""}</small></div></li>`;
+  };
+  let h = `<h2>Champion choice</h2><p class="pick"><b>${esc(o.advice)}</b></p><ul class="threats">${o.rows.map(row).join("")}</ul>`;
+  if (!o.personal) h += `<p class="dim">Rated from the game's own difficulty scores. Ratings written for you are still being prepared.</p>`;
+  return h;
+}
+
 function debriefHtml(d) {
   const list = (items, cls) => `<ul class="play ${cls}">` + items.map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`;
   let h = `<h2>Review of your last game: ${esc(d.champion)}, ${d.win ? "win" : "loss"}, ${d.minutes} minutes</h2><p>${esc(d.verdict)}</p>`;
   if ((d.went_well || []).length) h += `<p class="dim">What went well</p>` + list(d.went_well, "");
+  if (d.deaths) h += `<p class="dim">How you died: ${esc(d.deaths)}.</p>`;
   if ((d.to_fix || []).length) h += `<p class="dim">What to do differently</p>` + list(d.to_fix, "");
   if (d.build_review) h += `<p class="dim">Your build</p><p>${esc(d.build_review)}</p>`;
   if (d.focus_next_game) h += `<p class="pick" style="font-size:18px">Next game: <b>${esc(d.focus_next_game)}</b></p>`;
@@ -220,6 +236,12 @@ function scalingHtml(v) {
   const s = v.advice.scaling || {};
   if (!s.goal) return "";
   let h = `<h2>How you take over the game</h2><p>${esc(s.goal)}</p>`;
+  const c = s.combo || {};
+  if (c.name) {
+    h += `<p class="pick">Your combination: <b>${esc(c.name)}</b></p>`;
+    if ((c.have || []).length) h += `<p>${c.have.map(n => `<span class="aug">${esc(n)}</span>`).join("")}</p>`;
+    if ((c.next || []).length) h += `<p class="dim">Still needed, most important first:</p><ul class="play">` + c.next.map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`;
+  }
   if ((s.power_spikes || []).length) h += `<ul class="play">` + s.power_spikes.map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`;
   if ((s.augments_to_look_for || []).length) h += `<p class="dim">Augments to take if offered:</p><ul class="play">` + s.augments_to_look_for.map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`;
   return h;
@@ -243,21 +265,26 @@ function threatsHtml(v) {
 }
 
 function trackerHtml(t) {
-  const row = p => {
-    const missing = Math.max(0, p.possible - p.known.length);
+  // The card is about the player's own augments. Other players appear only once one of theirs has been read.
+  const row = (p, mine) => {
+    const missing = mine ? Math.max(0, p.possible - p.known.length) : 0;
     const chips = p.known.map(n => `<span class="aug">${esc(n)}${p.assumed.includes(n) ? " (assumed)" : ""}</span>`).join("")
-      + Array(missing).fill(`<span class="aug miss">not captured</span>`).join("");
-    return `<div class="row"><img class="c" src="${champImg(p.champ_id)}" alt=""><span class="nm">${esc(p.champion)}</span><span class="count">${p.known.length} of ${p.possible}</span><span class="augs">${chips || `<span class="dim">none yet at this level</span>`}</span></div>`;
+      + Array(missing).fill(`<span class="aug miss">not recorded</span>`).join("");
+    return `<div class="row"><img class="c" src="${champImg(p.champ_id)}" alt=""><span class="nm">${esc(p.champion)}</span><span class="augs">${chips || `<span class="dim">none yet at this level</span>`}</span></div>`;
   };
-  const group = (title, side) => {
-    const players = t.players.filter(p => p.side === side);
-    return players.length ? `<h3>${title}</h3>` + players.map(row).join("") : "";
-  };
-  let h = `<h2>Augments captured: ${t.known} of up to ${t.possible}</h2>`;
-  if (t.last && t.last.age < 15) h += `<p class="flash">Just captured: ${esc(t.last.name)} ${t.last.owner ? `for ${esc(t.last.owner)}` : "(could not tell whose it is)"}</p>`;
-  h += `<div class="team">${group("Enemies", "enemy")}${group("Your team", "ally")}${group("You", "you")}</div>`;
+  const you = t.players.find(p => p.side === "you");
+  const others = t.players.filter(p => p.side !== "you" && p.known.length);
+  let h = `<h2>Your augments${you ? `: ${you.known.length} of up to ${you.possible}` : ""}</h2>`;
+  if (t.last && t.last.age < 15) h += `<p class="flash">Just read from the scoreboard: ${esc(t.last.name)} ${t.last.owner ? `for ${esc(t.last.owner)}` : "(could not tell whose it is)"}</p>`;
+  h += `<div class="team">${you ? row(you, true) : ""}${others.length ? `<h3>Other players</h3>` + others.map(p => row(p, false)).join("") : ""}</div>`;
   if (t.unowned.length) h += `<p class="dim">Read but not matched to a player: ${esc(t.unowned.join(", "))}. Point at it again with the mouse on that player's row.</p>`;
-  h += `<p class="dim">To capture one: hold Tab and rest the mouse on an augment icon for half a second. "Up to" counts by level, so a player may not have picked their latest one yet.</p>`;
+  if (you && you.assumed.length) h += `<p class="dim">"Assumed" means the coach recorded its own pick without seeing which card you took. To correct one, tap the card you took on the "Augment choice" card while it is showing.</p>`;
+  return h;
+}
+
+function deathsHtml(d) {
+  let h = `<h2>How you died</h2><p>${esc(d.last)}</p><p class="dim">This game: ${esc(d.line)}.</p>`;
+  if (d.rule) h += `<p class="pick" style="font-size:18px">${esc(d.rule)}</p>`;
   return h;
 }
 
@@ -275,6 +302,8 @@ function render(v) {
   const live = v.status === "live";
   show("idle", !live); show("live", live);
   show("debrief", !live && !!v.debrief);
+  show("options", !live && !!v.champ_options);
+  if (!live && v.champ_options) set("options", optionsHtml(v.champ_options));
   if (!live) { set("who", ""); set("idle", idleHtml(v)); if (v.debrief) set("debrief", debriefHtml(v.debrief)); return; }
 
   const me = v.me;
@@ -298,6 +327,8 @@ function render(v) {
   const scalingCard = a ? scalingHtml(v) : "";
   show("scaling", !!scalingCard); set("scaling", scalingCard);
   set("teams", `<h2>Scoreboard</h2><div class="team">${teamHtml("Enemies", v.teams.enemies)}${teamHtml("Your team", v.teams.allies)}</div>`);
+  show("deaths", !!v.deaths);
+  if (v.deaths) set("deaths", deathsHtml(v.deaths));
   show("tracker", !!v.augment_tracker);
   if (v.augment_tracker) set("tracker", trackerHtml(v.augment_tracker));
   $("readscreen").textContent = `Read my screen (${v.hotkey})`;

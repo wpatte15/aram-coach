@@ -5,7 +5,7 @@ import json
 import threading
 import time
 
-from . import advisor, config, itemset, lcu, live, ocr, postgame, screen, shop
+from . import advisor, config, deaths, itemset, lcu, live, ocr, postgame, screen, shop
 from .log import log
 
 
@@ -30,9 +30,10 @@ class Coach:
         self.poll_error = None
         self.pregame = None              # plan made before the match: {champ_id, advice, enemies_known}
         self.pregame_info = None         # what the panel shows while waiting
+        self.champ_options = None        # champions on offer in champion select, ranked (see champfit.rank)
         self.pre_cost, self.pre_calls = 0.0, 0
         self._loading_plan_at = 0.0      # when a loading-screen plan was requested and is not back yet
-        self.item_set = None             # the in-game item set written in champion select: {champ_id, extras, ids}
+        self.item_set = None             # the in-game item set written in champion select: {champ_id, ids}
         self.debrief = self._load_last_debrief()   # review of the most recent finished match
         self._reader = None              # reads augment offers off the screen; built on first use
         self._reset_game()
@@ -49,6 +50,14 @@ class Coach:
         self.offers = []                 # augment offers seen this game: {names, pick, taken, assumed}
         self._offer = None               # the offer on screen right now (an entry of self.offers)
         self._offer_misses = 0
+        self._offer_candidate = None    # the cards read on the last scan, waiting for a second scan to agree
+        self._offer_partial = 0          # scans in a row that read fewer than three cards
+        self._death_at = 0.0             # when the player died, while the plan for that death is being held
+        self._death_trigger = ""
+        self.deaths = []                 # the player's deaths this game, as measured by deaths.record
+        self._alive_since = None         # game time the player last came back to life; None when not seen
+        self._hover_misses = 0
+        self._start_misses = 0
         self.seen_augments = {}          # other players' augments read from scoreboard tooltips: {champion: [names]}
         self._hover_news = []            # newly read augments not yet passed to a plan update
         self._last_capture_seen = None   # the most recent tooltip read: {name, owner, at}
@@ -91,37 +100,15 @@ class Coach:
 
     # ---- before the match ------------------------------------------------
 
-    def set_item_set(self, champ_id, extras, item_set):
+    def set_item_set(self, champ_id, item_set):
         """Remember what was written into the in-game shop, or forget it when the file is removed."""
         with self.lock:
-            self.item_set = None if item_set is None else {
-                "champ_id": champ_id, "extras": extras, "ids": itemset.item_ids(item_set), "rewritten": None}
+            self.item_set = None if item_set is None else {"champ_id": champ_id, "ids": itemset.item_ids(item_set)}
 
     def _item_set_for(self, state):
         """The item set, if it was written for the champion being played. Call with the lock held."""
         me = state["me"] if state else None
         return self.item_set if self.item_set and me and me["champ_id"] == self.item_set["champ_id"] else None
-
-    def _rewrite_item_set(self, state, advice):
-        """Rewrite the item set file to match a new live plan, stamped with the game time.
-
-        The game may only read the file when the match loads, in which case this changes
-        nothing on screen. The stamp in the title makes it easy to see which is true.
-        """
-        with self.lock:
-            current = self._item_set_for(state)
-            build = [b["item_id"] for b in advice["build_order"]]
-            if current is None or not self.source.capture or current["rewritten"] == build:
-                return
-            current["rewritten"] = build
-            champ_id, extras = current["champ_id"], current["extras"]
-        stamp = f"{int(state['time']) // 60}:{int(state['time']) % 60:02d}"
-        try:
-            path, _ = itemset.write(self.sd, champ_id, advice, extras, stamp=f"updated {stamp}")
-            log("item_set_rewritten", game_time=int(state["time"]), build=[b["name"] for b in advice["build_order"]],
-                written=path is not None)
-        except Exception as exc:
-            log("item_set_rewrite_failed", error=repr(exc))
 
     def loading_plan_started(self):
         """The loading-screen plan has been requested. The match may load before it is back."""
@@ -173,6 +160,11 @@ class Coach:
                 return advisor.plan_summary(self.pregame["advice"], 0)
             return ""
 
+    def set_champ_options(self, ranked):
+        """The ranked champions on offer in champion select, or None when champion select is over."""
+        with self.lock:
+            self.champ_options = ranked
+
     def set_pregame_info(self, info: dict, merge: bool = False):
         with self.lock:
             self.pregame_info = {**(self.pregame_info or {}), **info} if merge else info
@@ -200,6 +192,10 @@ class Coach:
                 self.status = status
                 return
             state = live.summarize(raw, self.sd)
+            if state["me"] is None and self.status != "live" and self._start_misses < 20:
+                self._start_misses += 1      # the first second of a match can lack the player's name
+                self.status = "loading"
+                return
             prev = self.state
             new_game = self.status != "live" or prev is None or state["time"] + 30 < prev["time"]
             if new_game:
@@ -217,18 +213,37 @@ class Coach:
             in_set = self._item_set_for(state)
             state["item_set"] = [self.sd.items[i]["name"] for i in in_set["ids"] if i in self.sd.items] if in_set else None
             self.status, self.state = "live", state
-            died = bool(prev and prev["me"] and state["me"] and state["me"]["dead"] and not prev["me"]["dead"])
+            me, was = state["me"], prev and prev["me"]
+            died = bool(was and me and me["dead"] and not was["dead"])
+            if new_game:
+                self._alive_since = 0.0 if state["time"] < 60 else None      # None: joined a match already under way
+            elif was and me and was["dead"] and not me["dead"]:
+                self._alive_since = state["time"]
+            if died:
+                self.deaths.append(deaths.record(state, self._alive_since,
+                                                 after=self.deaths[-1]["time"] if self.deaths else -1.0))
+            state["deaths"] = self._death_summary(state)
             self._capture(raw, state, force=new_game or died)
             self._check_triggers(state, died)
 
+    def _death_summary(self, state):
+        """Breakdown of the player's deaths so far, or None. Call with the lock held."""
+        me = state["me"]
+        if me is None or not self.deaths:
+            return None
+        rows = [deaths.classify(d, state["kills"], me["team"], state["time"]) for d in self.deaths]
+        return deaths.summarize(rows, tank="Tank" in me["tags"])
+
     def _game_over(self):
         """The match has ended: log it and start the post-game review in the background."""
+        died = (self.state or {}).get("deaths")
         log("game_over", game=self.game_id, client_game_id=self.lcu_game_id, calls=self.game_calls,
-            cost=round(self.game_cost, 3), game_time=int(self.state["time"]) if self.state else None)
+            cost=round(self.game_cost, 3), game_time=int(self.state["time"]) if self.state else None,
+            deaths=died and died["line"])
         if self.source.capture and self.lcu_game_id:
             folder = config.CAPTURE_DIR / self.game_id
             threading.Thread(target=postgame.run, name="postgame", daemon=True,
-                             args=(self, self.sd, folder, self.lcu_game_id, self._plan_summary())).start()
+                             args=(self, self.sd, folder, self.lcu_game_id, self._plan_summary(), died)).start()
 
     def _adopt_pregame(self, state):
         """Start the match with the plan made in champion select or on the loading screen."""
@@ -297,7 +312,20 @@ class Coach:
             # only when the plan is old or an enemy has finished an item since it was made.
             old = time.time() - self.advice_meta.get("at", 0) > config.DEATH_REFRESH_AFTER
             if new or old:
-                self.request("the player just died and the shop is open" + (f"; {bought}" if new else ""), urgent=True)
+                self._death_at = time.time()
+                self._death_trigger = "the player just died and the shop is open" + (f"; {bought}" if new else "")
+        if self._death_at:
+            # In Mayhem an augment offer often opens at the moment of death, and taking it asks for
+            # a plan too. Eight real games made 29 such doubled plans. Wait a moment: if an offer is
+            # on screen, the plan made when it closes covers this death as well.
+            held = time.time() - self._death_at
+            offer_open = self._offer is not None or self._offer_candidate is not None
+            wait = config.DEATH_PLAN_WAIT if state["mode"] == "KIWI" else 0.0
+            if held >= wait and (not offer_open or held >= 45):
+                self._death_at = 0.0
+                self.request(self._death_trigger, urgent=True)
+            return
+        if died:
             return
         if not state["me"]["dead"] and not config.UPDATE_WHILE_ALIVE:
             # A living player cannot shop and is not reading the panel. What changed meanwhile is
@@ -368,7 +396,6 @@ class Coach:
                     self.error = None
                     self._have_live_plan = True
                     self._spent(meta)
-                    threading.Thread(target=self._rewrite_item_set, args=(state, advice), daemon=True).start()
                 else:
                     if self.advice_meta.get("partial"):
                         self.advice, self.advice_meta = None, {}   # drop a half-arrived plan
@@ -470,6 +497,11 @@ class Coach:
 
         Runs every 0.7 seconds during an ARAM: Mayhem match. Reading the three card titles
         takes about 50 ms locally, so no hotkey and no model call are needed to notice an offer.
+
+        Cards animate in, and a scan can catch one or two of them. In eight real games that
+        produced 80 requests for 29 offers. So a set of cards is acted on only after two scans
+        in a row read the same thing, a set of fewer than three is given a little longer to
+        fill in, and a set already answered in this offer is answered from memory.
         """
         with self.lock:
             state = self.state
@@ -479,18 +511,27 @@ class Coach:
         if not screen.league_in_front():
             return
         if self._reader is None:
-            self._reader = ocr.OfferReader(self.sd.augments_described())
-        offer = self._reader.find(screen.grab())
+            self._reader = ocr.OfferReader(self.sd.augments_all())
+        shot = screen.grab()
+        offer = self._reader.find(shot)
         names = [a["name"] for a in offer]
         with self.lock:
             if self.state is None:
                 return
             if not names:
+                self._offer_candidate = None
                 self._offer_closed_maybe()
                 return
             self._offer_misses = 0
+            if names != self._offer_candidate:
+                self._offer_candidate, self._offer_partial = names, 0
+                return                       # wait for a second scan to agree
+            if len(names) < 3:
+                self._offer_partial += 1
+                if self._offer_partial < 3:
+                    return                   # a third card may still be appearing
             if self._offer is None:
-                self._offer = {"names": [], "pick": "", "taken": None, "assumed": False}
+                self._offer = {"names": [], "pick": "", "taken": None, "assumed": False, "answers": {}}
                 self.offers.append(self._offer)
             if names == self._offer["names"]:
                 return
@@ -504,21 +545,38 @@ class Coach:
                 "offered": [{"name": a["name"], "tier": a["tier"], "summary": a["description"][:240]} for a in offer],
             }
             log("offer_seen", game=self.game_id, game_time=int(self.state["time"]), offered=names, wanted=wanted)
-            args = (episode, offer, names, self.state, self._plan_summary(), self.game_id)
+            known = episode["answers"].get(tuple(names))
+            if known:                        # the cards went back to a set already answered
+                episode["pick"] = known["pick"]
+                self.screen.update(known, choosing=False)
+                return
+            args = (episode, offer, names, self.state, self._plan_summary(), self.game_id, shot)
         threading.Thread(target=self._choose_augment, args=args, name="augment", daemon=True).start()
 
-    def _choose_augment(self, episode, offer, names, state, previous, game_id):
+    def _choose_augment(self, episode, offer, names, state, previous, game_id, shot=None):
+        # Stat shards and a few augments have no description in the data. For those, Claude reads
+        # the cards from the picture instead, which needs an API key.
+        by_picture = shot is not None and config.BACKEND == "api" and any(not a["description"] for a in offer)
         try:
-            result, meta = advisor.choose_augment(self.sd, state, previous, offer)
+            if by_picture:
+                seen, meta = advisor.read_screen(self.sd, state, previous, screen.to_jpeg(shot))
+                on_offer = {ocr.fold(n): n for n in names}
+                result = {"pick": on_offer.get(ocr.fold(seen["pick"]), seen["pick"]), "why": seen["why"],
+                          "reroll": "", "note": seen["note"]}
+                if seen["offered"]:
+                    result["offered"] = [{"name": o["name"], "tier": "", "summary": o["summary"]} for o in seen["offered"]]
+            else:
+                result, meta = advisor.choose_augment(self.sd, state, previous, offer)
         except Exception as exc:
             result, meta = {"pick": "", "why": f"No pick: {exc}", "reroll": "", "note": ""}, {}
         log("offer_pick", game=game_id, offered=names, pick=result["pick"], why=result["why"],
-            latency=meta.get("latency"), cost=meta.get("cost"))
+            latency=meta.get("latency"), cost=meta.get("cost"), by_picture=by_picture)
         with self.lock:
             if game_id != self.game_id:
                 return
             if meta:
                 self._spent(meta)
+                episode["answers"][tuple(names)] = result
             if episode["names"] != names:
                 return                       # the cards changed while Claude was answering
             episode["pick"] = result["pick"]
@@ -558,11 +616,20 @@ class Coach:
         if not screen.league_in_front():
             return
         if self._reader is None:
-            self._reader = ocr.OfferReader(self.sd.augments_described())
+            self._reader = ocr.OfferReader(self.sd.augments_all())
         shot, cursor = screen.grab(), screen.cursor_position()
         lines = ocr.read_lines(shot)
         augment = self._reader.tooltip(lines, cursor)
         if augment is None:
+            on_panel = ((cursor[0] < 0.21 * shot.width or cursor[0] > 0.79 * shot.width)
+                        and 0.26 * shot.height < cursor[1] < 0.68 * shot.height)
+            if on_panel and self.source.capture and self._hover_misses < 6:
+                self._hover_misses += 1
+                folder = config.CAPTURE_DIR / game_id
+                folder.mkdir(parents=True, exist_ok=True)
+                shot.save(folder / f"hover_miss_t{game_time:05d}_{self._hover_misses}.png")
+                near = [l["text"] for l in lines if abs(l["x"] - cursor[0]) < 620 and abs(l["y"] - cursor[1]) < 420]
+                log("hover_miss", game=game_id, game_time=game_time, cursor=list(cursor), text_near_cursor=near[:25])
             return
         anchors = ocr.score_anchors(shot, lines)
         owner, rows = ocr.scoreboard_owner(anchors, cursor, shot.size, order)
@@ -663,6 +730,9 @@ class Coach:
         if self.screen and self.screen.get("kind") == "augment_choice" and self.offers:
             self.screen["taken"] = self.offers[-1]["taken"]
             self.screen["assumed"] = self.offers[-1]["assumed"]
+        if self._death_at:                   # this plan also serves as the plan for the death that was held
+            self._death_at = 0.0
+            reason += "; the player is dead and the shop is open"
         self.request(reason, urgent=True)
 
     def took_augment(self, name: str):
@@ -700,6 +770,7 @@ class Coach:
             state = self.state
             if self.status != "live" or state is None:
                 view["pregame"] = self.pregame_info
+                view["champ_options"] = self.champ_options
                 view["debrief"] = self.debrief
                 return view
             me = state["me"]
@@ -719,6 +790,7 @@ class Coach:
                 view["error"] = view["error"] or "Could not tell which player is you in the game data."
                 return view
             view["me"] = {**self._lite(me), "gold": me["gold"], "respawn": me["respawn"]}
+            view["deaths"] = state.get("deaths")
             if not self.advice:
                 return view
 

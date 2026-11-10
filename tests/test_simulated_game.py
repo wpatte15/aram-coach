@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
-from aramcoach import advisor, config, itemset, lcu, llm, postgame, pregame, screen  # noqa: E402
+from aramcoach import advisor, champfit, config, itemset, lcu, llm, postgame, pregame, screen  # noqa: E402
 from aramcoach.coach import Coach  # noqa: E402
 from aramcoach.static_data import StaticData  # noqa: E402
 
@@ -37,12 +37,18 @@ class FakeClient:
         self.folder = folder
         self.phase = "None"
         self.picks = None                 # (my champion, teammates) during champion select
+        self.bench = []                   # champions on the shared bench during champion select
         self.teams = None                 # (mine, allies, enemies) from the loading screen on
         self.record = json.loads((FIXTURES / "match_record.json").read_text(encoding="utf-8"))
 
     def install(self):
         lcu.phase = lambda: self.phase
         lcu.champ_select = lambda: self.picks
+        lcu.champ_options = lambda: self.picks and {
+            "mine": self.picks[0], "mates": self.picks[1], "bench": self.bench, "cards": [], "phase": "FINALIZATION",
+            "raw": {"benchChampions": [{"championId": key} for key in self.bench]}}
+        lcu.match_history = lambda count=40: None
+        lcu.timeline = lambda game_id: {"frames": [{"events": [], "participantFrames": {}, "timestamp": 0}]}
         lcu.match_teams = lambda: self.teams
         lcu.queue_info = lambda: {"id": 3270, "description": "ARAM: Mayhem", "mode": "KIWI", "mapId": 12}
         lcu.install_dir = lambda: self.folder
@@ -75,13 +81,18 @@ class StubClaude:
             "threats": [{"champion": "Garen", "danger": "spins", "answer": "walk away"}],
             "duels": [{"champion": "Garen", "verdict": "avoid", "fight_when": "below about 40% health", "why": "ahead"}],
             "scaling": {"goal": "A wall he cannot kill.", "power_spikes": ["Thornmail finished."],
+                        "combo": {"name": "Health wall", "have": ["Heavy Hitter"],
+                                  "next": ["Thornmail: reflects his hits", "", 7, "an augment that scales with health",
+                                           "a third piece", "a fourth piece"]},
                         "augments_to_look_for": ["Heavy Hitter: scales with health"]},
             "skill_order": "Q first.", "changed": "",
         }
         if kind.startswith("REQUEST: pregame"):
             answer = json.dumps({**plan, "threats": [], "duels": [], "title": "Tank Thresh",
                                  "situational": [{"title": "If they heal a lot", "item_ids": [3075, 999999]}],
-                                 "pool": [3065, 3075, 999998]})       # Spirit Visage, a repeat, an unknown id
+                                 "augment_builds": [{"title": "If an augment adds crit", "item_ids": [3031, 999997]},
+                                                    {"title": "", "item_ids": [3065]}, "not a group"],
+                                 "pool": [3065, 3075, 3031, 999998]})  # Spirit Visage, two repeats, an unknown id
         elif kind.startswith("REQUEST: plan"):
             answer = json.dumps(plan)
         elif kind.startswith("REQUEST: screen"):
@@ -118,9 +129,13 @@ def main():
     sd = StaticData()
     work = Path(tempfile.mkdtemp(prefix="aramcoach-test-"))
     config.CAPTURE_DIR = work / "captures"
+    config.CACHE_DIR = work / "cache"     # set after the game data has loaded: only the player's history lives here now
     config.LOG_FILE = work / "logs" / "coach.log"
+    champfit.load = lambda sd: {"Jinx": {"ease": 2, "job": "damage", "why": "fragile"},
+                                "Thresh": {"ease": 5, "job": "support", "why": "you know him"}}
     config.MIN_ADVICE_INTERVAL = 0.0
     config.DEATH_REFRESH_AFTER = 0.0      # the test runs a 9-minute match in seconds, so every plan would look fresh
+    config.DEATH_PLAN_WAIT = 0.0          # no real time passes between snapshots here
     client = FakeClient(work / "league")
     client.install()
     claude = StubClaude()
@@ -140,26 +155,34 @@ def main():
     assert claude.prompts == [] and coach.view()["status"] == "waiting"
 
     # 2. Champion select. The champion must be stable for two polls before a plan is paid for.
-    client.phase, client.picks = "ChampSelect", (JINX, [])
+    client.phase, client.picks, client.bench = "ChampSelect", (JINX, []), [THRESH]
     pre._tick()
     assert claude.prompts == [], "one sighting of a champion must not trigger a plan"
+    choice = coach.view()["champ_options"]
+    assert choice["advice"] == "Swap to Thresh, on the bench." and choice["personal"] is True, \
+        "the champions on offer must be ranked at once, without a call to Claude"
+    assert [(r["champion"], r["source"]) for r in choice["rows"]] == [("Thresh", "bench"), ("Jinx", "yours")]
+    samples = list((config.CAPTURE_DIR / "champselect").glob("*/session-*.json"))
+    assert len(samples) == 1, "the raw champion-select session should be kept for checking the client's format"
     pre._tick()
     wait_for(lambda: set_file.exists(), "the Jinx item set")
     assert json.loads(set_file.read_text(encoding="utf-8"))["championKey"] == "Jinx"
 
     # 3. A reroll to Thresh: the Jinx set must go at once, then a Thresh set is written.
-    client.picks = (THRESH, [])
+    client.picks, client.bench = (THRESH, []), [JINX]
     pre._tick()
     assert not set_file.exists(), "the old champion's item set must be removed when the champion changes"
+    assert coach.view()["champ_options"]["advice"] == "Keep Thresh."
     pre._tick()
     wait_for(lambda: set_file.exists(), "the Thresh item set")
     item_set = json.loads(set_file.read_text(encoding="utf-8"))
     assert item_set["title"] == "Coach: Tank Thresh" and item_set["championKey"] == "Thresh"
     assert [b["type"] for b in item_set["blocks"]] == [
         "1. Buy at the start (1400 gold)", "2. Then finish these, left to right", "If they heal a lot",
-        "Other items the coach may call for"]
+        "If an augment adds crit", "Other items the coach may call for"]
     assert item_set["blocks"][2]["items"] == [{"id": "3075", "count": 1}], "unknown item ids must be dropped"
-    assert item_set["blocks"][3]["items"] == [{"id": "3065", "count": 1}], "the pool must skip repeats and unknown ids"
+    assert item_set["blocks"][3]["items"] == [{"id": "3031", "count": 1}], "an augment group must be in the set"
+    assert item_set["blocks"][4]["items"] == [{"id": "3065", "count": 1}], "the pool must skip repeats and unknown ids"
     wait_for(lambda: (coach.view().get("pregame") or {}).get("status") == "ready", "pregame info on the panel")
     assert coach.view()["pregame"]["item_set"] == "Coach: Tank Thresh"
     assert claude.kinds() == ["pregame", "pregame"]
@@ -167,6 +190,7 @@ def main():
     # 4. Loading screen: the enemy is known, so the full plan is made before the match loads.
     client.phase, client.teams = "InProgress", (THRESH, [], [GAREN])
     pre._tick()
+    assert coach.view()["champ_options"] is None, "the champion choice must leave the panel when champion select ends"
     pre._tick()
     wait_for(lambda: coach.pregame and coach.pregame["enemies_known"], "the loading-screen plan")
     assert claude.kinds()[-1] == "plan" and "ENEMY TEAM:\n  Garen" in claude.prompts[-1]
@@ -181,6 +205,14 @@ def main():
     view = coach.view()
     assert view["status"] == "live" and view["me"]["champion"] == "Thresh" and view["game"]["mode"] == "ARAM: Mayhem"
     assert view["advice"]["headline"] == "Stack armor and outlast Garen."
+    assert view["advice"]["scaling"]["combo"] == {
+        "name": "Health wall", "have": ["Heavy Hitter"],
+        "next": ["Thornmail: reflects his hits", "an augment that scales with health", "a third piece"]}, \
+        "the combination must reach the panel, with empty and non-text pieces dropped and three kept"
+    unnamed = advisor._validate({"build_order": [{"name": "Thornmail"}], "scaling": {"combo": {"have": ["Deft"]}}},
+                                sd.catalog("std"))
+    assert unnamed["scaling"]["combo"] == {"name": "", "have": [], "next": []}, "pieces without a name are not a combination"
+    assert "No combination under way." in advisor.plan_summary(unnamed, 0)
     assert view["buy_now"]["purchases"], "the buy list must be filled in from the starting gold"
     assert view["meta"]["trigger"] == "made before the match loaded"
     time.sleep(1.3)
@@ -206,12 +238,14 @@ def main():
     assert "t00523.json" not in names, "no plan should be requested once the match has ended"
     last_plan_prompt = next(p for p in reversed(claude.prompts) if p.startswith("REQUEST: plan"))
     assert "WHO HAS KILLED YOU THIS GAME: Garen" in last_plan_prompt
+    died = coach.view()["deaths"]
+    assert died["count"] >= 3 and died["outnumbered"] == 0, f"one against one is never outnumbered: {died}"
+    assert died["line"].startswith(f"{died['count']} deaths") and died["last"].startswith("You ")
+    assert "HOW YOU DIED THIS GAME (measured): " in last_plan_prompt
     assert "items in your in-game item set: " in last_plan_prompt and "Spirit Visage" in last_plan_prompt
     assert all(b["in_set"] is True for b in coach.view()["build"]), "every item of this plan is in the set"
-    wait_for(lambda: "updated" in json.loads(set_file.read_text(encoding="utf-8"))["title"], "the live rewrite of the item set")
-    rewritten = json.loads(set_file.read_text(encoding="utf-8"))
-    assert [b["type"] for b in rewritten["blocks"]][2:] == ["If they heal a lot", "Other items the coach may call for"], \
-        "a live rewrite must keep the champion-select groups"
+    assert json.loads(set_file.read_text(encoding="utf-8")) == item_set, \
+        "the item set must not be rewritten during the match: the game reads it only when the match loads"
     assert "augments seen: Totentanz" in last_plan_prompt, "Garen's spell-slot augment should be detected"
     assert "TEAM SIZES: your side has 1, the enemy side has 1." in last_plan_prompt
 
@@ -243,11 +277,15 @@ def main():
     screen.grab = lambda: offer_frame
     before = len(claude.prompts)
     coach.scan_for_offer()
+    assert coach._offer is None and len(claude.prompts) == before, "one scan alone must not start anything"
+    coach.scan_for_offer()                       # the second scan agrees, so the offer is real
     shown = coach.view()["screen"]
     assert [o["name"] for o in shown["offered"]] == ["Growth Spurt", "Dawnbringer's Resolve", "Recursion"]
     assert shown["choosing"] is True, "the cards should be on the panel before Claude has answered"
     wait_for(lambda: coach.view()["screen"].get("pick") == "Recursion", "the pick for the offer")
     assert claude.kinds()[-1] == "augments" and "Recursion (" in claude.prompts[-1]
+    assert "Combination under way: Health wall. Pieces held: Heavy Hitter. Still needed: Thornmail" in claude.prompts[-1], \
+        "an augment pick must be told which combination the plan is building"
     coach.scan_for_offer()
     assert len(claude.prompts) == before + 1, "the same offer must not be sent to Claude twice"
     screen.league_in_front = lambda: False       # alt-tabbed away: the offer must not be treated as closed
@@ -307,19 +345,59 @@ def main():
     assert you["known"] == ["Heavy Hitter", "Growth Spurt"] and you["assumed"] == []
     assert tracker["unowned"] == ["Typhoon"] and tracker["last"]["name"] == "Typhoon" and tracker["last"]["owner"] is None
     assert tracker["known"] <= tracker["possible"]
+
+    # 7d. A stat-shard offer: the names are not in the augment data, so Claude reads the cards from the picture.
+    shard_frame = Image.new("RGB", (1920, 1080), (14, 26, 34))
+    draw = ImageDraw.Draw(shard_frame)
+    for centre, title in ((592, "Swiftness Shard"), (960, "Health Shard"), (1328, "Armor Shard")):
+        font = ImageFont.truetype("C:/Windows/Fonts/georgiab.ttf", 24)
+        draw.text((centre - draw.textlength(title, font=font) / 2, 450), title, font=font, fill=(240, 230, 210))
+    screen.grab = lambda: shard_frame
+    config.BACKEND = "api"
+    before = len(claude.prompts)
+    coach.scan_for_offer(); coach.scan_for_offer()
+    wait_for(lambda: len(claude.prompts) > before and coach.view()["screen"].get("pick"), "the pick for a shard offer")
+    assert claude.kinds()[-1] == "screen", "an offer without descriptions must be read from the picture"
+    assert [o["name"] for o in coach.offers[-1:] for o in [{"name": n} for n in o["names"]]] == \
+        ["Swiftness Shard", "Health Shard", "Armor Shard"]
+
+    # 7e. Dying while an offer is open: the death's plan waits, and the plan made when the offer closes covers both.
+    before = len(claude.prompts)
+    feed(snapshots[5])                           # a snapshot in which the player has just died
+    time.sleep(0.4)
+    assert len(claude.prompts) == before and coach._pending is None, "no plan for the death while an offer is open"
+    screen.grab = lambda: Image.new("RGB", (1920, 1080), (30, 40, 35))
+    for _ in range(3):
+        coach.scan_for_offer()
+    wait_for(lambda: len(claude.prompts) > before and not coach.thinking, "the single plan after the offer closed")
+    assert "the player is dead and the shop is open" in claude.prompts[-1].split("\n", 1)[0]
+    assert len(claude.prompts) == before + 1, "one plan, not one for the death and one for the augment"
+
+    # 7f. A first snapshot that does not name the player is treated as still loading, not as a match.
+    blank = json.loads(snapshots[5].read_text(encoding="utf-8"))
+    for key in ("riotId", "riotIdGameName", "summonerName"):
+        blank["activePlayer"].pop(key, None)
+    probe = Coach(sd, NoSource())
+    probe._on_snapshot(blank, "live")
+    assert probe.view()["status"] == "loading" and probe.game_id is None
     assert list((config.CAPTURE_DIR / coach.game_id).glob("hover_t*.png")), "the first hover pictures should be kept"
 
     # 8. The match ends: the post-game record is saved and reviewed, and the item set is removed.
     game_folder = config.CAPTURE_DIR / coach.game_id
+    final_deaths = coach.view().get("deaths")   # steps 7 to 7d replayed earlier snapshots, which restarts the count
     coach._on_snapshot(None, "waiting")
     assert coach.view()["status"] == "waiting"
     wait_for(lambda: coach.debrief is not None, "the post-game review")
     review = coach.view()["debrief"]
     assert review["champion"] == "Thresh" and review["win"] is False and review["focus_next_game"]
     assert "Garen" in review["augments"]
+    assert review["deaths"] == (final_deaths and final_deaths["line"]), "the review must carry the death breakdown"
     saved = json.loads((game_folder / "postgame.json").read_text(encoding="utf-8"))
+    assert f"HOW THE PLAYER DIED (measured by the coach during the match): {died['line']}." in \
+        advisor.render_debrief(saved, "", died), "the review request must state the measured deaths"
     assert len(saved["players"]) == 2 and sum(p["me"] for p in saved["players"]) == 1
     assert (game_folder / "debrief.json").exists()
+    assert (game_folder / "timeline.json").exists(), "the match's kill timeline should be kept"
     pre._tick()                                # the client still says InProgress for a moment
     assert set_file.exists()
     client.phase = "EndOfGame"

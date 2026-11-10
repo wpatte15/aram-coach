@@ -209,7 +209,8 @@ def pregame_state(sd, mine: str, allies: list, enemies: list, mode_label: str) -
         "ended": False, "mode": "", "mode_label": mode_label, "map": 12, "time": 0.0, "me": me,
         "allies": [_blank_player(sd, c) for c in allies],
         "enemies": [_blank_player(sd, c) for c in enemies],
-        "events": [], "killed_me": {}, "item_ids": [], "augment_fields": {}, "queue": None, "scoreboard": [],
+        "events": [], "kills": [], "killed_me": {}, "item_ids": [], "augment_fields": {}, "queue": None,
+        "scoreboard": [],
     }
 
 
@@ -252,6 +253,29 @@ def _deaths_by_enemy(raw: dict, active: dict, champ_by_name: dict, enemy_champs:
             if champ in enemy_champs:
                 tally.setdefault(champ, {"kills": 0, "assists": 0})[kind] += 1
     return tally
+
+
+def _kills(raw: dict, raw_players: list, players: list, active: dict) -> list:
+    """Every champion kill so far, oldest first: {time, victim, victim_team, killer, me}.
+
+    `me` marks the player's own deaths. A victim is identified by team and champion, which is
+    unique: both teams can hold the same champion, but one team cannot hold it twice.
+    """
+    by_name = {}
+    for rp, p in zip(raw_players, players):
+        for name in _names(rp):
+            by_name[name] = p
+    mine = _names(active)
+    out = []
+    for e in ((raw.get("events") or {}).get("Events") or []):
+        if e.get("EventName") != "ChampionKill":
+            continue
+        victim, killer = by_name.get(e.get("VictimName")), by_name.get(e.get("KillerName"))
+        out.append({"time": e.get("EventTime") or 0.0,
+                    "victim": victim["champion"] if victim else "", "victim_team": victim["team"] if victim else None,
+                    "killer": killer["champion"] if killer else "",      # empty for a turret or minion
+                    "me": e.get("VictimName") in mine})
+    return sorted(out, key=lambda k: k["time"])
 
 
 def summarize(raw: dict, sd) -> dict:
@@ -299,6 +323,7 @@ def summarize(raw: dict, sd) -> dict:
         "allies": allies,
         "enemies": enemies,
         "events": _events(raw, champ_by_name, now),
+        "kills": _kills(raw, raw_players, players, active) if me else [],
         # Every player in the API's order, which is the scoreboard's row order within each team.
         "scoreboard": [{"team": p["team"], "champion": p["champion"], "kda": p["kda"]} for p in players],
         "killed_me": _deaths_by_enemy(raw, active, champ_by_name, {p["champion"] for p in enemies}) if me else {},

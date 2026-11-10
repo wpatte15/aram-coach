@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import re
+import threading
 
 from PIL import Image
 
@@ -27,6 +28,7 @@ BAND = (0.08, 0.28, 0.92, 0.58)        # left, top, right, bottom
 _TARGET_HEIGHT = 420                    # the band is scaled to about this height before reading
 
 _engine = None
+_engine_lock = threading.Lock()         # Windows allows one recognition at a time per engine
 
 
 def _get_engine():
@@ -60,7 +62,8 @@ def read_lines(image: Image.Image) -> list:
     async def recognise():
         return await engine.recognize_async(bitmap)
 
-    result = asyncio.run(recognise())
+    with _engine_lock:
+        result = asyncio.run(recognise())
     lines = []
     for line in result.lines:
         words = [{"text": w.text, "x": w.bounding_rect.x + w.bounding_rect.width / 2,
@@ -113,6 +116,7 @@ def locate(lines: list, names: dict, cutoff: float = 0.8) -> list:
     return [(names[key], x, y) for key, (_score, x, y) in found.items()]
 
 
+_SHARD = re.compile(r"^(?:[A-Z][a-z]+ ){1,2}Shard$")
 _SCORE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{1,2})$")
 ROW_PITCH = 76 / 1080      # distance between scoreboard rows as a share of screen height (measured at 1080p)
 
@@ -206,6 +210,9 @@ class OfferReader:
         folded = fold(text)
         if folded in self.by_fold:
             return self.by_fold[folded]
+        shard = _SHARD.match(text.strip())
+        if shard:                                 # stat shards are offered like augments but are not in the data
+            return {"name": shard.group(0), "tier": "Shard", "description": ""}
         if len(folded) < 6:
             return None                           # short names must match exactly
         close = difflib.get_close_matches(folded, self.folds, n=2, cutoff=0.84)

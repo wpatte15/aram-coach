@@ -11,10 +11,13 @@ from __future__ import annotations
 import threading
 import time
 
-from . import advisor, itemset, lcu, live
+import json
+
+from . import advisor, champfit, config, itemset, lcu, live
 from .log import log
 
 ARAM_MAP = 12
+_SESSION_SAMPLES = 12      # raw champion-select sessions kept per champion select, for checking the client's format
 
 
 class Pregame:
@@ -26,9 +29,15 @@ class Pregame:
         self._played = False       # the current match has already been live
         self._phase = None         # client phase on the previous poll
         self._set_for = None       # champion number the item set on disk was written for
+        self._offered = None       # the champions on offer at the last poll of champion select
+        self._samples = 0          # raw sessions saved during this champion select
+        self._select_id = ""       # names the folder those sessions are saved in
+        self._record = {}          # the player's results per champion; read when champion select starts
+        self._history_read = False
 
     def start(self):
         itemset.clear()            # a set left by an earlier run would show for the wrong champion
+        champfit.ensure(self.sd)   # rate every champion for this player, once, ahead of champion select
         threading.Thread(target=self._loop, name="pregame", daemon=True).start()
 
     def _loop(self):
@@ -48,10 +57,19 @@ class Pregame:
         self._phase = phase
         if phase != previous_phase:
             log("client_phase", phase=phase)
+        if phase is not None and not self._history_read:
+            self._history_read = True        # the client is up: copy the match history once, in the background
+            threading.Thread(target=self._read_history, name="history", daemon=True).start()
+        if phase != "ChampSelect" and self._offered is not None:
+            self._offered = None
+            self.coach.set_champ_options(None)
         if phase == "ChampSelect":
             self._played = False
             if previous_phase != "ChampSelect":
                 self._drop_item_set()        # new champion select: the last game's set no longer applies
+                self._samples, self._select_id = 0, time.strftime("%Y%m%d-%H%M%S")
+                self._record = champfit.record(self.sd)
+            self._rank_options(lcu.champ_options())
             picks = lcu.champ_select()
             if picks:
                 self._consider(picks[0], picks[1], [], enemies_known=False)
@@ -66,10 +84,38 @@ class Pregame:
             if phase is not None:            # back in the client with no match: remove the finished game's set
                 self._drop_item_set()
 
+    def _read_history(self):
+        try:
+            champfit.refresh_history(self.sd)
+        except Exception as exc:             # the history only improves the ranking; never let it stop anything
+            log("history_failed", error=repr(exc))
+
+    def _rank_options(self, options):
+        """Rank the champions on offer and put the result on the panel. Local, so it takes no time."""
+        if not options:
+            return
+        offered = (options["mine"], tuple(options["cards"]), tuple(options["bench"]), tuple(sorted(options["mates"])))
+        if offered == self._offered:
+            return
+        self._offered = offered
+        ranked = champfit.rank(self.sd, options, champfit.load(self.sd), self._record)
+        self.coach.set_champ_options(ranked)
+        name = lambda key: self.sd.champ_by_key.get(key, key)
+        log("champ_options", phase=options.get("phase"), mine=name(options["mine"]) if options["mine"] else None,
+            cards=[name(k) for k in options["cards"]], bench=[name(k) for k in options["bench"]],
+            advice=ranked and ranked["advice"])
+        if options.get("raw") and self._samples < _SESSION_SAMPLES:
+            # How the client reports the two champion cards is not documented. Keeping a few raw
+            # sessions (identities removed) lets the format be checked after a real champion select.
+            self._samples += 1
+            folder = config.CAPTURE_DIR / "champselect" / self._select_id
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / f"session-{self._samples:02d}.json").write_text(json.dumps(options["raw"]), encoding="utf-8")
+
     def _drop_item_set(self):
         itemset.clear()
         self._set_for = None
-        self.coach.set_item_set(None, None, None)
+        self.coach.set_item_set(None, None)
 
     def _consider(self, mine: int, allies: list, enemies: list, enemies_known: bool):
         if self._set_for is not None and self._set_for != mine:
@@ -120,7 +166,7 @@ class Pregame:
         if not enemies_known:
             written, item_set = itemset.write(sd, champ_id, advice)
             self._set_for = mine if written else None
-            self.coach.set_item_set(champ_id, advice, item_set)
+            self.coach.set_item_set(champ_id, item_set)
             log("item_set", champion=champ_id, title=advice.get("title"), path=str(written) if written else None)
         self.coach.set_pregame(champ_id, advice, enemies_known, meta.get("cost") or 0.0)
         info = {"champion": name, "champ_id": champ_id, "status": "ready", "headline": advice["headline"],

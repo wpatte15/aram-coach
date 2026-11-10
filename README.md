@@ -6,11 +6,15 @@ It is built for players who find the number of items and augments overwhelming. 
 
 ## What it does
 
-- **Before the match.** In champion select it plans a build for your champion and writes it into the in-game shop as an item set named "Coach: ...". On the loading screen, once the enemy team is known, it prepares the full plan so it is ready when you spawn.
+- **Champion choice.** In champion select the panel ranks the champions you can take: the one you hold, your cards, and the team's bench. Each is rated for how easy it is for you, from your own description in `player.txt`, with your past results on it and what your team is missing. The ranking is local and instant, and updates as the bench changes. The coach only shows the ranking: you make the swap yourself.
+- **How you died.** After each death the panel says what kind it was: outnumbered (for example 3 against 5), first on your team to die in the fight, alone, or straight after respawning. When one kind repeats, it shows one rule for it, and the next plan and the post-game review use the counts.
+- **Before the match.** In champion select it plans a build for your champion and writes it into the in-game shop as an item set named "Coach: ...". The set holds the main build, a group of items per enemy type, a group per direction an augment could push the build, and a pool of other items. On the loading screen, once the enemy team is known, it prepares the full plan so it is ready when you spawn.
 - **What to buy now.** When you die, the panel lists the exact items to buy with your current gold, including components. This part is local arithmetic and updates every second.
 - **The plan.** A build order with a reason per item, three to five instructions for this champion against these enemies, the most dangerous enemies, an estimate of which enemies you can fight alone, and how your build scales.
+- **Combinations.** In ARAM: Mayhem the coach looks for augments, items and a part of your champion's kit that multiply each other, such as crit augments plus Infinity Edge on a Garen whose spin can crit. It prefers augment cards that start or extend one, rebuilds the item order around it, and shows on the panel which pieces you hold and what is still missing. When nothing supports a combination, it says so and keeps the plain build.
 - **Augments.** The game does not report augments, so the coach reads them off the screen with Windows' built-in text recognition. When the three augment cards appear, the panel shows them and Claude's pick follows in about five seconds. No key press is needed.
-- **Other players' augments.** Hold Tab and rest the mouse on an augment icon on the scoreboard. The coach reads the tooltip and records the augment against that player. The "Augments captured" card shows what is recorded and what is missing.
+- **Your augments.** When the cards close, the coach records its pick as the one you took, marked "assumed". Tap a different card on the panel if you took that one. The "Your augments" card lists what is recorded.
+- **Other players' augments (optional).** Hold Tab and rest the mouse on an augment icon on the scoreboard. The coach reads the tooltip and records the augment against that player. Other players appear on the "Your augments" card once one of theirs has been read.
 - **Questions.** Type a question into the panel, such as "is anti-heal worth it now?".
 - **After the match.** A short review written from the game's own post-game record: measured damage, healing, items and every player's augments.
 
@@ -76,7 +80,7 @@ Open `http://127.0.0.1:8777` in a browser. A second monitor works best. With one
 2. In the shop, open the item set dropdown and pick "Coach: ...".
 3. When you die, read the top card on the panel and buy what it lists.
 4. At an augment choice, look at the panel. The pick arrives a few seconds after the cards do.
-5. To record other players' augments, hold Tab and rest the mouse on each icon for half a second.
+5. Optional: to record other players' augments, hold Tab and rest the mouse on each icon for half a second.
 6. After the match, the review appears on the panel.
 
 `F9` is a fallback that sends a screenshot to Claude when the automatic augment reading misses.
@@ -138,6 +142,8 @@ Other timings are in `aramcoach/config.py`.
 | `llm.py` | Calls Claude, through the API or the Claude Code CLI |
 | `shop.py` | Turns a build order and your gold into exact purchases |
 | `pregame.py`, `itemset.py` | Champion-select and loading-screen plans, and the in-game item set |
+| `champfit.py` | Ranks the champions on offer in champion select: ease ratings, your record, team needs |
+| `deaths.py` | Classifies each of your deaths from the kill events and who was alive |
 | `ocr.py`, `screen.py` | Screen capture, text recognition, augment offers and scoreboard tooltips |
 | `postgame.py` | The post-game record and review |
 | `static_data.py` | Item, champion, ability and augment data, cached per patch |
@@ -150,7 +156,10 @@ Estimated enemy stats come from base stats, level and item stat lines. They leav
 ## Files written
 
 - `cache/<patch>/`: item, champion, augment and ability data, downloaded once per patch.
-- `captures/<game start time>/`: raw game API payloads, screenshots taken for augment reads and scoreboard reads, the post-game record and the review. These contain other players' names. They are ignored by git; do not share them.
+- `cache/champion_fit.json`: Claude's rating of every champion for you. It is written once, in about a minute, and again whenever you edit `player.txt`.
+- `cache/history.json`: your champion, result and deaths in recent matches, copied from the client's match history.
+- `captures/champselect/`: a few raw champion-select sessions per match, with player identities removed, kept to check the client's data format.
+- `captures/<game start time>/`: raw game API payloads, screenshots taken for augment reads and scoreboard reads, the post-game record, the kill timeline and the review. These contain other players' names. They are ignored by git; do not share them.
 - `logs/coach.log`: one line per event. Read this to find out what happened in a game.
 - `Config\Global\Recommended\!!!aramcoach-0.json` in the League folder: the in-game item set. It is removed when the match ends.
 
@@ -169,11 +178,15 @@ Estimated enemy stats come from base stats, level and item stat lines. They leav
 
 ```
 .venv\Scripts\python.exe tests\test_shop.py
+.venv\Scripts\python.exe tests\test_deaths.py
+.venv\Scripts\python.exe tests\test_champfit.py
 .venv\Scripts\python.exe tests\test_simulated_game.py
 .venv\Scripts\python.exe tests\test_real_scoreboard.py
 ```
 
 - `test_shop.py` checks the purchase arithmetic.
+- `test_deaths.py` checks the death breakdown against small hand-made fights.
+- `test_champfit.py` checks the champion-select ranking.
 - `test_simulated_game.py` runs a whole recorded match through the coach with a fake League client and a stub in place of Claude. It costs nothing. Run it after any change to `coach.py`, `pregame.py` or `postgame.py`.
 - `test_real_scoreboard.py` checks scoreboard row detection against a real picture in `captures/`. It is skipped when you have no such recording.
 
@@ -184,8 +197,9 @@ The coach reads the game's local APIs, the League client's local API, and the sc
 ## Known limits
 
 - The game API does not report augments. Other players' augments are known only when you point at them, or when one replaces a summoner spell.
-- Whether the game shows a changed item set mid-match is not confirmed. The set written in champion select is built wide to cover later plans.
+- The game reads the item set once, when the match loads. A later plan can name an item that is not in the set; the panel marks it, and you find it with the shop search. The set written in champion select is built wide to make this rare.
 - The augment tooltip reader has been tested on a real scoreboard layout but not yet on a real tooltip.
+- The champion-choice ranking reads the bench from the champion-select session. The two champion cards at the start are read from the client's "subset champion list". That source is taken from the client's own type definitions and has not yet been watched in a real champion select.
 - The item catalog covers the ARAM shop only.
 - Text recognition needs the English game client.
 

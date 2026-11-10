@@ -218,7 +218,7 @@ class StaticData:
         raw = self._json(f"{DDRAGON}/cdn/{self.version}/data/en_US/champion.json", "champion.json")["data"]
         self.champions = {
             cid: {"id": cid, "name": c["name"], "tags": c.get("tags", []), "resource": c.get("partype", ""),
-                  "base": c.get("stats", {})}
+                  "base": c.get("stats", {}), "difficulty": (c.get("info") or {}).get("difficulty")}
             for cid, c in raw.items()
         }
         # The League client identifies champions by number, for example 412 for Thresh.
@@ -342,6 +342,10 @@ class StaticData:
             self._described = list(
                 {e["name"]: e for e in self._aug_by_name.values() if e["name"] and e["description"]}.values())
         return self._described
+
+    def augments_all(self) -> list:
+        """Every augment name known, described or not, one entry per augment. Used to recognise names on screen."""
+        return list({e["name"]: e for e in self._aug_by_name.values() if e["name"]}.values())
 
     def augment(self, key):
         """Look an augment up by numeric id, display name, or internal name."""

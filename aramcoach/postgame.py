@@ -58,8 +58,11 @@ def wait_for_record(game_id: int, timeout: float = _WAIT_SECONDS):
     return None
 
 
-def run(coach, sd, folder, game_id: int, last_plan: str):
-    """Collect the post-game record, save it, write the review, and hand it to the panel."""
+def run(coach, sd, folder, game_id: int, last_plan: str, deaths: dict | None = None):
+    """Collect the post-game record, save it, write the review, and hand it to the panel.
+
+    deaths: the coach's breakdown of how the player died in this match, when it has one.
+    """
     try:
         game = wait_for_record(game_id)
         if game is None:
@@ -69,13 +72,17 @@ def run(coach, sd, folder, game_id: int, last_plan: str):
         if folder is not None:
             folder.mkdir(parents=True, exist_ok=True)
             (folder / "postgame.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False), encoding="utf-8")
+            kills = lcu.timeline(game_id)        # kept because the client forgets matches older than its last 40
+            if kills:
+                (folder / "timeline.json").write_text(json.dumps(kills), encoding="utf-8")
         me = next((p for p in summary["players"] if p["me"]), None)
         if me is None or summary["minutes"] < 3:
             log("postgame_skipped", game_id=game_id, minutes=summary["minutes"], found_me=me is not None)
             return
-        review, meta = advisor.get_debrief(sd, summary, last_plan)
+        review, meta = advisor.get_debrief(sd, summary, last_plan, deaths)
         review.update(champion=me["champion"], champ_id=me["champ_id"], win=me["win"], minutes=summary["minutes"],
-                      augments={p["champion"]: p["augments"] for p in summary["players"]})
+                      augments={p["champion"]: p["augments"] for p in summary["players"]},
+                      deaths=deaths and deaths["line"])
         if folder is not None:
             (folder / "debrief.json").write_text(json.dumps(review, indent=1, ensure_ascii=False), encoding="utf-8")
         log("debrief", game_id=game_id, latency=meta.get("latency"), cost=meta.get("cost"), verdict=review["verdict"])
