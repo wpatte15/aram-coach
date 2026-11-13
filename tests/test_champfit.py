@@ -41,6 +41,9 @@ TABLE = {
 }
 
 
+config.player_profile = lambda: "I am new to the game."      # no favourites unless a test names some
+
+
 def options(mine=0, bench=(), cards=(), mates=()):
     return {"mine": mine, "bench": list(bench), "cards": list(cards), "mates": list(mates)}
 
@@ -88,6 +91,36 @@ def test_team_need_counts_once_teammates_have_champions():
     crowded = champfit.rank(SD, options(mine=22, bench=[37], mates=[99, 222, 7]), TABLE, {})
     ashe = next(r for r in crowded["rows"] if r["champion"] == "Ashe")
     assert ashe["need"] == "your team already has 3 damage dealers" and ashe["score"] == 3.5
+
+
+def test_favourites_are_read_from_the_profile():
+    real = config.player_profile
+    config.player_profile = lambda: ("I am new.\n\nLove to play: garen, Sona\nLike to play: Jinx, sona, Nobody and Lux.\n"
+                                     "I do not like to play: LeBlanc\nChampions I understand reasonably well: Ashe.")
+    try:
+        assert champfit.favourites(SD) == {"Garen": "love", "Sona": "love", "Jinx": "like", "Lux": "like", "Ashe": "like"}
+    finally:
+        config.player_profile = real
+    assert champfit.favourites(SD) == {}
+
+
+def test_a_favourite_comes_before_an_easier_champion_the_team_needs():
+    liked = {"Jinx": "like", "Leblanc": "love"}
+    # Garen is easier and the team has no front line, but the player asked for Jinx.
+    ranked = champfit.rank(SD, options(mine=99, bench=[86, 222], mates=[99, 22, 37]), TABLE, {}, liked)
+    assert [r["champion"] for r in ranked["rows"]] == ["Jinx", "Garen", "Lux"]
+    assert ranked["advice"] == "Swap to Jinx, on the bench." and ranked["rows"][0]["liked"] == "like"
+    # A loved champion beats a liked one, even one rated hard.
+    ranked = champfit.rank(SD, options(mine=222, bench=[7, 86]), TABLE, {}, liked)
+    assert [r["champion"] for r in ranked["rows"]] == ["LeBlanc", "Jinx", "Garen"]
+    assert ranked["advice"] == "Swap to LeBlanc, on the bench."
+    # Holding a favourite, a small gain among equals is still not worth a swap.
+    both = {"Jinx": "like", "Lux": "like"}
+    ranked = champfit.rank(SD, options(mine=222, bench=[99]), TABLE, {"Lux": {"games": 2, "wins": 1, "deaths": 8.0}}, both)
+    assert ranked["advice"] == "Keep Jinx."
+    # With no favourite on offer the ranking is what it was.
+    ranked = champfit.rank(SD, options(mine=7, bench=[222, 86]), TABLE, {}, {"Sona": "love"})
+    assert [r["champion"] for r in ranked["rows"]] == ["Garen", "Jinx", "LeBlanc"] and ranked["rows"][0]["liked"] == ""
 
 
 def test_cards_before_a_champion_is_held():

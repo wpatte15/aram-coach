@@ -256,10 +256,12 @@ def _deaths_by_enemy(raw: dict, active: dict, champ_by_name: dict, enemy_champs:
 
 
 def _kills(raw: dict, raw_players: list, players: list, active: dict) -> list:
-    """Every champion kill so far, oldest first: {time, victim, victim_team, killer, me}.
+    """Every champion kill so far, oldest first: {time, victim, victim_team, killer, credit, me}.
 
-    `me` marks the player's own deaths. A victim is identified by team and champion, which is
-    unique: both teams can hold the same champion, but one team cannot hold it twice.
+    `me` marks the player's own deaths. `credit` lists the players the game credited with the
+    kill, the killer and those who assisted, each as (team, champion). A player is identified
+    by team and champion, which is unique: both teams can hold the same champion, but one
+    team cannot hold it twice.
     """
     by_name = {}
     for rp, p in zip(raw_players, players):
@@ -271,9 +273,11 @@ def _kills(raw: dict, raw_players: list, players: list, active: dict) -> list:
         if e.get("EventName") != "ChampionKill":
             continue
         victim, killer = by_name.get(e.get("VictimName")), by_name.get(e.get("KillerName"))
+        credited = [by_name[n] for n in [e.get("KillerName")] + (e.get("Assisters") or []) if n in by_name]
         out.append({"time": e.get("EventTime") or 0.0,
                     "victim": victim["champion"] if victim else "", "victim_team": victim["team"] if victim else None,
                     "killer": killer["champion"] if killer else "",      # empty for a turret or minion
+                    "credit": [(p["team"], p["champion"]) for p in credited],
                     "me": e.get("VictimName") in mine})
     return sorted(out, key=lambda k: k["time"])
 
@@ -295,6 +299,19 @@ def summarize(raw: dict, sd) -> dict:
         me["stats"] = {k: round(stats[k], 2 if k in ("attackSpeed", "critChance", "lifeSteal", "omnivamp") else 0)
                        for k in _STAT_KEYS if isinstance(stats.get(k), (int, float))}
         me["resource"] = stats.get("resourceType")
+        # What the calculators need beyond `stats` (see calc.py). Kept apart so the stats line of a request,
+        # which Claude reads, stays as it was. The game gives a penetration as the share of the resistance
+        # that is left: 0.65 with Lord Dominik's Regards, 1.0 with none. No recorded match held a lethality item,
+        # so which of the two flat fields carries it is not known: the larger is taken, never the sum.
+        number = lambda key, default: stats[key] if isinstance(stats.get(key), (int, float)) else default
+        me["more"] = {"crit_damage": number("critDamage", 200.0) / 100, "armor_left": number("armorPenetrationPercent", 1.0),
+                      "lethality": max(number("physicalLethality", 0.0), number("armorPenetrationFlat", 0.0)),
+                      "resist_left": number("magicPenetrationPercent", 1.0),
+                      "magic_pen": max(number("magicPenetrationFlat", 0.0), number("magicLethality", 0.0)),
+                      "range": number("attackRange", 0.0), "mana": number("resourceMax", 0.0) if stats.get("resourceType") == "MANA" else 0.0}
+        # Share of health left, 0 to 1. Kept out of `stats` because it changes every second.
+        full, left = stats.get("maxHealth"), stats.get("currentHealth")
+        me["health"] = round(left / full, 2) if isinstance(full, (int, float)) and full > 0 and isinstance(left, (int, float)) else None
         me["ability_ranks"] = {k: (v or {}).get("abilityLevel", 0)
                                for k, v in (active.get("abilities") or {}).items() if k in "QWER"}
         me["runes"] = [r.get("displayName") for r in ((active.get("fullRunes") or {}).get("generalRunes") or [])

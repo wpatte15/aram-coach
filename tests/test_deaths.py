@@ -1,4 +1,4 @@
-"""Checks the death breakdown against small hand-made fights.
+"""Checks the death verdicts against small hand-made fights.
 
 Run with: .venv\\Scripts\\python.exe tests\\test_deaths.py
 """
@@ -11,79 +11,119 @@ from aramcoach import deaths  # noqa: E402
 
 ALLIES = ["Lux", "Jinx", "Leona", "Ahri"]
 ENEMIES = ["Garen", "Zed", "Sona", "Vayne", "Malphite"]
+ME = ("ORDER", "Thresh")
 
 
-def kill(time, victim, team, me=False, killer="Garen"):
-    return {"time": time, "victim": victim, "victim_team": team, "killer": killer, "me": me}
+def kill(time, victim, credit=(), me=False):
+    """A kill event. credit: the champions credited with it, killer first."""
+    team = "ORDER" if victim in ALLIES or me else "CHAOS"
+    other = "CHAOS" if team == "ORDER" else "ORDER"
+    return {"time": time, "victim": victim, "victim_team": team, "killer": credit[0] if credit else "",
+            "credit": [(other, c) for c in credit], "me": me}
+
+
+def died(time, credit=("Garen",)):
+    return kill(time, "Thresh", credit, me=True)
 
 
 def snapshot(time, kills, dead=()):
-    """A game state with the named champions dead. Kills must include the player's own death."""
+    """A game state in which the named champions are dead."""
     player = lambda name, team: {"champion": name, "team": team, "dead": name in dead}
     return {"time": time, "kills": kills, "me": {"champion": "Thresh", "team": "ORDER", "dead": True},
             "allies": [player(n, "ORDER") for n in ALLIES], "enemies": [player(n, "CHAOS") for n in ENEMIES]}
 
 
-def test_outnumbered_counts_only_players_who_died_first():
-    kills = [kill(100, "Lux", "ORDER"), kill(104, "Jinx", "ORDER"), kill(110, "Thresh", "ORDER", me=True),
-             kill(110.5, "Leona", "ORDER")]
-    state = snapshot(111, kills, dead={"Lux", "Jinx", "Leona"})         # Leona died after the player
-    death = deaths.record(state, alive_since=40.0)
-    assert (death["with"], death["against"]) == (3, 5), death
-    assert death["time"] == 110 and death["killer"] == "Garen" and death["alive_for"] == 70.0
-    row = deaths.classify(death, kills, "ORDER", now=111)
-    assert row["outnumbered"] and not row["first"] and row["kind"] == "outnumbered"
-    assert deaths.describe(row) == "You died fighting 3 against 5."
+def verdict(kills, at, now, dead=(), health=None, seen=None):
+    """Record the player's death at `at` and classify it at `now`. seen: the kills known when the player died."""
+    death = deaths.record(snapshot(at + 0.5, kills if seen is None else seen, dead), health)
+    return deaths.classify(death, kills, ME, now)
 
 
-def test_first_to_die_in_a_fight():
-    kills = [kill(200, "Thresh", "ORDER", me=True), kill(203, "Lux", "ORDER"), kill(205, "Zed", "CHAOS")]
-    death = deaths.record(snapshot(200.6, kills[:1]), alive_since=100.0)
-    assert (death["with"], death["against"]) == (5, 5)
-    row = deaths.classify(death, kills, "ORDER", now=230)
-    assert row["first"] and not row["alone"] and not row["outnumbered"] and row["kind"] == "first"
+def test_a_fight_the_team_won_is_a_trade():
+    kills = [died(200, ("Garen", "Zed")), kill(203, "Zed", ("Jinx", "Lux")), kill(205, "Garen", ("Jinx",)),
+             kill(206, "Lux", ("Vayne",))]
+    row = verdict(kills, 200, now=230, seen=kills[:1])
+    assert row["kind"] == "trade" and (row["ours"], row["theirs"]) == (2, 2), row
+    assert deaths.describe(row) == "A fair trade: your team killed 2 and lost 2, you included."
 
 
-def test_alone_needs_the_fight_window_to_pass():
-    kills = [kill(300, "Thresh", "ORDER", me=True)]
-    death = deaths.record(snapshot(300.5, kills), alive_since=200.0)
-    early = deaths.classify(death, kills, "ORDER", now=305)
-    assert not early["alone"] and early["kind"] == "first", "a fight may still follow within the window"
-    late = deaths.classify(death, kills, "ORDER", now=320)
-    assert late["alone"] and not late["first"] and late["kind"] == "alone"
+def test_alone_against_several():
+    kills = [died(300, ("Garen", "Zed", "Sona", "Vayne"))]
+    row = verdict(kills, 300, now=320)
+    assert row["kind"] == "alone" and row["by"] == 4
+    assert deaths.describe(row) == ("You were in there without your team: 4 enemies killed you and no teammate "
+                                    "was in the fight.")
 
 
-def test_soon_after_respawning_and_unknown_respawn():
-    kills = [kill(400, "Thresh", "ORDER", me=True), kill(403, "Zed", "CHAOS")]      # a fight was going on
-    death = deaths.record(snapshot(400.5, kills[:1]), alive_since=380.0)
-    row = deaths.classify(death, kills, "ORDER", now=420)
-    assert row["soon"] and row["kind"] == "soon" and deaths.describe(row) == "You died 20 seconds after respawning."
-    unknown = deaths.classify(deaths.record(snapshot(400.5, kills[:1]), alive_since=None), kills, "ORDER", now=420)
-    assert not unknown["soon"], "without a seen respawn the life length is unknown"
+def test_picked_off_by_one_enemy():
+    kills = [kill(350, "Lux", ("Zed",)), died(400, ("Vayne",))]          # the earlier death is outside the fight
+    row = verdict(kills, 400, now=420)
+    assert row["kind"] == "picked" and deaths.describe(row).startswith("Vayne caught you with no fight going on")
+
+
+def test_the_verdict_waits_for_the_fight_to_end():
+    kills = [died(300, ("Garen", "Zed", "Sona"))]
+    early = verdict(kills, 300, now=305)
+    assert early["kind"] == "pending" and deaths.describe(early) == "The fight is still being decided."
+    late = kills + [kill(306, "Garen", ("Jinx",)), kill(307, "Zed", ("Jinx", "Lux"))]
+    assert verdict(late, 300, now=312, seen=kills)["kind"] == "trade", "kills after the death still count for the fight"
+
+
+def test_a_fight_that_started_short_handed():
+    # Lux and Jinx died half a minute earlier and are still dead. Leona dies in this fight, before the player.
+    kills = [kill(70, "Lux", ("Zed",)), kill(72, "Jinx", ("Zed",)), kill(96, "Leona", ("Garen",)), died(100)]
+    row = verdict(kills, 100, now=120, dead={"Lux", "Jinx", "Leona"})
+    assert (row["started_with"], row["started_against"]) == (3, 5), "Leona was alive when the fight began"
+    assert (row["with"], row["against"]) == (2, 5)
+    assert row["kind"] == "short" and deaths.describe(row) == "That fight started 3 against 5, and your team lost 2 for 0."
+
+
+def test_a_teammate_who_dies_in_the_fight_does_not_make_it_short_handed():
+    kills = [kill(96, "Leona", ("Garen",)), died(100)]
+    row = verdict(kills, 100, now=120, dead={"Leona"})
+    assert (row["started_with"], row["started_against"]) == (5, 5) and row["kind"] == "lost"
+    assert deaths.describe(row) == "Your team lost that fight 2 for 0 from even numbers."
+
+
+def test_starting_a_fight_at_low_health():
+    kills = [kill(96, "Leona", ("Garen",)), died(100)]
+    row = verdict(kills, 100, now=120, dead={"Leona"}, health=0.34)
+    assert row["kind"] == "low"
+    assert deaths.describe(row) == "You were at 34% health ten seconds before you died, and your team lost the fight."
+    healthy = verdict(kills, 100, now=120, dead={"Leona"}, health=0.8)
+    assert healthy["kind"] == "lost"
+
+
+def test_a_teammate_credited_with_a_kill_counts_as_being_in_the_fight():
+    kills = [died(100, ("Garen", "Zed", "Sona")), kill(104, "Sona", ("Ahri",)), kill(105, "Lux", ("Zed",)),
+             kill(106, "Jinx", ("Zed",))]
+    row = verdict(kills, 100, now=120, seen=kills[:1])
+    assert row["kind"] == "lost" and (row["ours"], row["theirs"]) == (3, 1), "Ahri was there, so it was not alone"
 
 
 def test_a_second_death_does_not_reuse_the_first_kill_event():
-    kills = [kill(100, "Thresh", "ORDER", me=True)]
-    second = deaths.record(snapshot(160, kills), alive_since=130.0, after=100)
-    assert second["time"] == 160 and second["killer"] == "", "the new death's event has not arrived yet"
+    kills = [died(100)]
+    second = deaths.record(snapshot(160, kills), None, after=100)
+    assert second["time"] == 160 and second["killer"] == "" and second["by"] == 0, "its own event has not arrived yet"
 
 
-def test_summary_counts_and_rule():
+def test_summary_counts_rule_and_note():
     assert deaths.summarize([]) is None
-    base = {"time": 0, "killer": "", "with": 3, "against": 5, "alive_for": 60.0}
-    rows = [{**base, "outnumbered": True, "alone": False, "soon": False, "first": False, "kind": "outnumbered"},
-            {**base, "outnumbered": True, "alone": False, "soon": True, "first": True, "kind": "outnumbered"},
-            {**base, "with": 5, "outnumbered": False, "alone": False, "soon": False, "first": True, "kind": "first"}]
-    s = deaths.summarize(rows)
-    assert s["count"] == 3 and s["outnumbered"] == 2 and s["first"] == 2 and s["soon"] == 1
-    assert s["line"] == ("3 deaths: 2 while outnumbered, 1 within 35 seconds of respawning, "
-                         "2 as the first on your team to die in the fight")
-    assert s["rule"].startswith("When your team has fewer players alive"), "a tie goes to the more specific kind"
-    assert s["last"] == "You were the first on your team to die in that fight."
-    assert deaths.summarize(rows[:1])["rule"] == "", "one death is not a pattern"
-    firsts = [rows[2], rows[2]]
-    assert deaths.summarize(firsts)["rule"].startswith("Let a teammate walk in first")
-    assert deaths.summarize(firsts, tank=True)["rule"].startswith("Going in first is your job")
+    row = lambda kind: {"kind": kind, "killer": "Zed", "by": 3, "ours": 2, "theirs": 0, "health": 0.3,
+                        "started_with": 3, "started_against": 5}
+    s = deaths.summarize([row("trade"), row("alone"), row("alone"), row("lost")], lead="Leona")
+    assert s["count"] == 4 and s["alone"] == 2 and s["trade"] == 1 and s["lost"] == 1 and s["short"] == 0
+    assert s["line"] == ("4 deaths: 1 in fights your team won or traded evenly, 2 alone against three or more enemies, "
+                         "1 in even fights your team lost")
+    assert s["rule"] == "Wait for Leona to go in first, then follow." and s["note"] == ""
+    assert deaths.summarize([row("alone"), row("alone")], tank=True, lead="Leona")["rule"] == \
+        "Go in only when teammates are right beside you.", "a front-line player is the one who goes in first"
+    assert deaths.summarize([row("alone")])["rule"] == "", "one death is not a pattern"
+    assert deaths.summarize([row("lost"), row("lost"), row("lost")])["rule"] == "", "a lost even fight has no local rule"
+    good = deaths.summarize([row("trade"), row("trade"), row("short")])
+    assert good["rule"] == "" and good["note"].startswith("2 of your 3 deaths came in fights your team won")
+    short = deaths.summarize([row("short"), row("short"), row("low"), row("low")])
+    assert short["rule"].startswith("When teammates are dead"), "a tie goes to the earlier verdict"
 
 
 if __name__ == "__main__":

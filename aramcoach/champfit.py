@@ -5,6 +5,8 @@ team can swap from. The choice is made in seconds and a good bench champion is t
 quickly, so the ranking cannot wait for Claude. It is worked out locally from three things
 prepared in advance:
 
+- the champions the player names in `player.txt` as ones they love or like to play. These
+  come first, whatever else is on offer: love before like, and both before the rest;
 - a fit table: for every champion, how easy it is for this player (1 to 5), the job it does
   on a team, and a few words of reason. Claude writes it once from the player's own
   description (`player.txt`); it is reused until that description or the champion list changes.
@@ -17,7 +19,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
+import time
 from collections import Counter
 
 from . import advisor, config, lcu, llm
@@ -27,8 +31,14 @@ JOBS = ("frontline", "damage", "support")
 _PLURAL = {"frontline": "front-line champions", "damage": "damage dealers", "support": "supports"}
 SWAP_MARGIN = 0.75           # a bench champion must beat the one in hand by this much to be worth a swap
 _VERSION = 1                 # raise to discard tables written for an older request format
+RETRY_AFTER_FAILURE = 600    # seconds before a failed rating request is tried again
+# Lines of player.txt that list the champions the player wants, such as "Love to play: Cho'Gath, Thresh".
+_FAVOURITE_LINES = {"love to play": "love", "like to play": "like",
+                    "champions i understand reasonably well": "like"}     # the label used before the other two
+_TIER = {"love": 2, "like": 1, "": 0}
 _lock = threading.Lock()
 _building = False
+_failed_at = 0.0
 
 
 def _table_path():
@@ -50,6 +60,28 @@ def _read(path) -> dict:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+# ---- the player's favourites -----------------------------------------------
+
+def favourites(sd) -> dict:
+    """The champions the player says they love or like to play: {champion id: "love" or "like"}.
+
+    Read from the lines of player.txt that start with "Love to play:" or "Like to play:",
+    each followed by champion names separated by commas. A champion on both lines counts as
+    loved. Names the game does not have are ignored.
+    """
+    found = {}
+    for line in config.player_profile().splitlines():
+        label, _, names = line.partition(":")
+        tier = _FAVOURITE_LINES.get(label.strip().lower())
+        if tier is None:
+            continue
+        for name in re.split(r"[,;.]|\band\b", names):
+            cid = sd.champ_id(name.strip()) if name.strip() else None
+            if cid and _TIER[tier] > _TIER[found.get(cid, "")]:
+                found[cid] = tier
+    return found
 
 
 # ---- the fit table ---------------------------------------------------------
@@ -93,6 +125,9 @@ def build(sd) -> dict:
     table = parse(sd, text)
     if len(table) < 0.9 * len(sd.champions):
         raise llm.LLMError(f"Claude rated only {len(table)} of {len(sd.champions)} champions.")
+    # The answer can miss a line or two. Keep the earlier rating for those champions when there is one.
+    earlier = _read(_table_path()).get("champions") or {}
+    table.update({cid: earlier[cid] for cid in sd.champions if cid not in table and cid in earlier})
     config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _table_path().write_text(json.dumps({"key": _key(sd), "champions": table}, indent=1, ensure_ascii=False),
                              encoding="utf-8")
@@ -104,15 +139,16 @@ def ensure(sd):
     """Start writing the fit table in the background when it is missing or out of date."""
     global _building
     with _lock:
-        if _building or load(sd) is not None:
+        if _building or time.time() - _failed_at < RETRY_AFTER_FAILURE or load(sd) is not None:
             return
         _building = True
 
     def work():
-        global _building
+        global _building, _failed_at
         try:
             build(sd)
         except Exception as exc:
+            _failed_at = time.time()         # each attempt is a paid request: do not repeat it every few seconds
             log("champion_fit_failed", error=str(exc)[:300])
         finally:
             _building = False
@@ -169,20 +205,24 @@ def record(sd) -> dict:
 
 # ---- ranking ---------------------------------------------------------------
 
-def rank(sd, options: dict, table, played: dict):
+def rank(sd, options: dict, table, played: dict, liked: dict | None = None):
     """Order the champions on offer for this player and this team.
 
     options: {mine, mates, bench, cards} as champion numbers (see lcu.champ_options).
     table: the fit table, or None to use the game's own difficulty scores.
     played: the player's record per champion (see record).
+    liked: the player's favourites (see favourites). Read from player.txt when not given.
     Returns {rows, advice, best, swap, personal}, or None when there is nothing to choose from.
-    Rows are best first: {champion, champ_id, source, ease, job, why, need, games, wins,
-    deaths, score}. `source` is "yours", "card" or "bench".
+    Rows are best first: {champion, champ_id, source, liked, ease, job, why, need, games, wins,
+    deaths, score}. `source` is "yours", "card" or "bench"; `liked` is "love", "like" or "".
 
-    The score is the ease rating, plus up to 0.8 for champions the player has played, plus
-    or minus a little for what the team needs. Ease weighs most on purpose: a champion the
-    player can use beats a champion the team wants.
+    A champion the player loves comes before one they like, and both come before every other
+    champion: the player has said those are the ones they know how to play. Within each of
+    those groups the order is by score: the ease rating, plus up to 0.8 for champions the
+    player has played, plus or minus a little for what the team needs. Ease weighs most on
+    purpose: a champion the player can use beats a champion the team wants.
     """
+    liked = favourites(sd) if liked is None else liked
     def fit(key):
         cid = sd.champ_by_key.get(key)
         return (table or {}).get(cid) or fallback(sd, cid)
@@ -208,15 +248,16 @@ def rank(sd, options: dict, table, played: dict):
             elif team[rating["job"]] >= 3:
                 score, need = score - 0.5, f"your team already has {team[rating['job']]} {_PLURAL[rating['job']]}"
         rows.append({"champion": sd.champions[cid]["name"], "champ_id": cid, "source": source,
-                     "ease": rating["ease"], "job": rating["job"], "why": rating["why"], "need": need,
+                     "liked": liked.get(cid, ""), "ease": rating["ease"], "job": rating["job"], "why": rating["why"], "need": need,
                      "games": past.get("games", 0), "wins": past.get("wins", 0), "deaths": past.get("deaths"),
                      "score": round(score, 2)})
     if not rows:
         return None
-    rows.sort(key=lambda r: -r["score"])
+    rows.sort(key=lambda r: (-_TIER[r["liked"]], -r["score"]))
     current = next((r for r in rows if r["source"] == "yours"), None)
     best = rows[0]
-    if current and best is not current and best["score"] - current["score"] < SWAP_MARGIN:
+    if (current and best is not current and best["liked"] == current["liked"]
+            and best["score"] - current["score"] < SWAP_MARGIN):
         best = current                                 # not enough better to be worth giving up the one in hand
     if current is None:
         advice = f"Take {best['champion']}."

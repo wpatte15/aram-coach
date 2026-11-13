@@ -41,33 +41,20 @@
   .build li.buy .mark, .build li.next .mark { color: var(--accent); }
   .play li { padding: 5px 0 5px 18px; position: relative; font-size: 17px; }
   .play li::before { content: ""; position: absolute; left: 2px; top: 15px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
-  .threats li, .duels li { display: flex; gap: 12px; padding: 7px 0; }
-  .threats img, .duels img { width: 36px; height: 36px; border-radius: 6px; flex: none; }
-  .threats .ans { color: var(--good); display: block; }
-  .chip { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; margin: 0 6px; border: 1px solid; }
-  .chip.good { color: var(--good); } .chip.warn { color: var(--warn); } .chip.bad { color: var(--bad); }
+  .threats li { display: flex; gap: 12px; padding: 7px 0; }
+  .threats img { width: 36px; height: 36px; border-radius: 6px; flex: none; }
+  .card .combo { margin: 0 0 8px; }
+  .combo b { color: var(--gold); }
   .pick { font-size: 22px; }
   .pick b { color: var(--accent); }
   .offers li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line); }
   .offers li:first-child { margin-top: 10px; }
-  .team { display: grid; grid-template-columns: 1fr; gap: 4px; }
-  .team .row { display: flex; align-items: center; gap: 8px; font-size: 14px; }
-  .team img.c { width: 26px; height: 26px; border-radius: 6px; flex: none; }
-  .team .row.dead { opacity: .45; }
-  .team .nm { width: 108px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .team .kda { width: 92px; color: var(--dim); font-variant-numeric: tabular-nums; }
-  .team .it img { width: 22px; height: 22px; border-radius: 3px; margin-right: 2px; vertical-align: middle; }
-  .team h3 { font-size: 13px; margin: 10px 0 4px; color: var(--dim); font-weight: 600; }
-  .aug { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 12px; margin: 2px 4px 2px 0; border: 1px solid #5a4d24; color: var(--gold); }
-  .aug.miss { color: var(--dim); border: 1px dashed var(--line); }
-  .team .augs { flex: 1; }
-  .flash { color: var(--good); font-weight: 600; }
-  form { display: flex; gap: 8px; }
+  form { display: flex; gap: 8px; margin-top: 12px; }
   input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; font: inherit; }
   button { background: var(--line); color: var(--text); border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor: pointer; white-space: nowrap; }
   button:hover { background: #303846; }
   button:disabled { opacity: .5; cursor: default; }
-  #answer { white-space: pre-wrap; }
+  #answer { white-space: pre-wrap; margin: 10px 2px 0; }
   .err { color: var(--bad); border-color: #5b2b2b; }
   .note { border-color: #4b4424; color: var(--gold); }
   .idle { text-align: center; padding: 48px 20px; color: var(--dim); font-size: 18px; }
@@ -94,22 +81,13 @@
     <section class="card open" id="screen" hidden></section>
     <h1 id="headline"></h1>
     <section class="card" id="buy"></section>
-    <section class="card" id="deaths" hidden></section>
-    <section class="card" id="tracker" hidden></section>
     <section class="card" id="build" hidden></section>
-    <section class="card" id="scaling" hidden></section>
     <section class="card" id="play" hidden></section>
-    <section class="card" id="duels" hidden></section>
-    <section class="card" id="threats" hidden></section>
-    <section class="card">
-      <h2>Ask the coach</h2>
-      <form id="askform">
-        <input id="q" maxlength="500" autocomplete="off" placeholder="For example: why that item and not Zhonya's?">
-        <button id="askbtn">Ask</button>
-      </form>
-      <p id="answer" hidden></p>
-    </section>
-    <section class="card" id="teams"></section>
+    <form id="askform">
+      <input id="q" maxlength="500" autocomplete="off" placeholder="Ask the coach. For example: why that item and not Zhonya's?">
+      <button id="askbtn">Ask</button>
+    </form>
+    <p id="answer" hidden></p>
     <footer><span id="meta"></span><span class="btns"><button id="readscreen">Read my screen</button><button id="refresh">Update plan</button></span></footer>
   </main>
 </div>
@@ -158,7 +136,7 @@ function optionsHtml(o) {
   const row = r => {
     const past = r.games ? `${r.games} game${r.games > 1 ? "s" : ""}, ${r.wins} won, ${r.deaths} deaths a game` : "not played before";
     return `<li><img src="${champImg(r.champ_id)}" alt=""><div><b>${esc(r.champion)}</b> <span class="dim">${where[r.source] || ""}</span>`
-      + `<small>${ease(r.ease)} · ${esc(r.job)}${r.why ? " · " + esc(r.why) : ""}</small>`
+      + `<small>${r.liked ? "<b>you " + esc(r.liked) + " playing this</b> · " : ""}${ease(r.ease)} · ${esc(r.job)}${r.why ? " · " + esc(r.why) : ""}</small>`
       + `<small class="dim">${past}${r.need ? " · " + esc(r.need) : ""}</small></div></li>`;
   };
   let h = `<h2>Champion choice</h2><p class="pick"><b>${esc(o.advice)}</b></p><ul class="threats">${o.rows.map(row).join("")}</ul>`;
@@ -221,78 +199,25 @@ function buyHtml(v) {
 }
 
 const MARKS = { done: "owned", buy: "buy now", next: "in progress", todo: "" };
+function comboHtml(v) {
+  // One line: the combination the build and the augment picks are working toward, and its next piece.
+  const c = (v.advice.scaling || {}).combo || {};
+  if (!c.name) return "";
+  const held = (c.have || []).length;
+  return `<p class="combo">Combination: <b>${esc(c.name)}</b>${held ? ` <span class="dim">· ${held} piece${held > 1 ? "s" : ""} held</span>` : ""}`
+    + `${(c.next || []).length ? ` <span class="dim">· next:</span> ${esc(c.next[0])}` : ""}</p>`;
+}
+
 function buildHtml(v) {
-  return `<h2>Your build, in order</h2><ol class="build">` + v.build.map(b =>
+  return `<h2>Your build, in order</h2>` + comboHtml(v) + `<ol class="build">` + v.build.map(b =>
     `<li class="${b.status}"><img src="${itemImg(b.id)}" alt=""><span class="nm">${esc(b.name)}<small>${esc(b.why)}</small>${b.in_set === false && b.status !== "done" ? `<small class="gold">Not in your in-game item set. Type its name in the shop search.</small>` : ""}</span><span class="mark">${MARKS[b.status] || ""}</span></li>`
   ).join("") + `</ol>` + (v.advice.changed ? `<p class="gold">Plan changed: ${esc(v.advice.changed)}</p>` : "");
 }
 
+// The plan asks for at most three instructions. The slice keeps the card to three if a plan sends more.
 function playHtml(v) {
-  return `<h2>How to play this game</h2><ul class="play">` + (v.advice.how_to_play || []).map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`
+  return `<h2>How to play this game</h2><ul class="play">` + (v.advice.how_to_play || []).slice(0, 3).map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`
     + (v.advice.skill_order ? `<p class="dim">Ability order: ${esc(v.advice.skill_order)}</p>` : "");
-}
-
-function scalingHtml(v) {
-  const s = v.advice.scaling || {};
-  if (!s.goal) return "";
-  let h = `<h2>How you take over the game</h2><p>${esc(s.goal)}</p>`;
-  const c = s.combo || {};
-  if (c.name) {
-    h += `<p class="pick">Your combination: <b>${esc(c.name)}</b></p>`;
-    if ((c.have || []).length) h += `<p>${c.have.map(n => `<span class="aug">${esc(n)}</span>`).join("")}</p>`;
-    if ((c.next || []).length) h += `<p class="dim">Still needed, most important first:</p><ul class="play">` + c.next.map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`;
-  }
-  if ((s.power_spikes || []).length) h += `<ul class="play">` + s.power_spikes.map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`;
-  if ((s.augments_to_look_for || []).length) h += `<p class="dim">Augments to take if offered:</p><ul class="play">` + s.augments_to_look_for.map(t => `<li>${esc(t)}</li>`).join("") + `</ul>`;
-  return h;
-}
-
-const enemyIds = v => Object.fromEntries(v.teams.enemies.map(p => [p.champion, p.champ_id]));
-const VERDICTS = { favored: ["you win", "good"], even: ["even", "warn"], avoid: ["avoid", "bad"] };
-function duelsHtml(v) {
-  const ids = enemyIds(v);
-  return `<h2>Can you fight them alone? Estimates</h2><ul class="duels">` + (v.advice.duels || []).map(d => {
-    const [label, cls] = VERDICTS[d.verdict] || VERDICTS.even;
-    return `<li>${ids[d.champion] ? `<img src="${champImg(ids[d.champion])}" alt="">` : ""}<div><b>${esc(d.champion)}</b><span class="chip ${cls}">${label}</span>Fight when: ${esc(d.fight_when)}<small>${esc(d.why)}</small></div></li>`;
-  }).join("") + `</ul>`;
-}
-
-function threatsHtml(v) {
-  const ids = enemyIds(v);
-  return `<h2>Watch out for</h2><ul class="threats">` + (v.advice.threats || []).map(t =>
-    `<li>${ids[t.champion] ? `<img src="${champImg(ids[t.champion])}" alt="">` : ""}<div><b>${esc(t.champion)}</b> ${esc(t.danger)}<span class="ans">${esc(t.answer)}</span></div></li>`
-  ).join("") + `</ul>`;
-}
-
-function trackerHtml(t) {
-  // The card is about the player's own augments. Other players appear only once one of theirs has been read.
-  const row = (p, mine) => {
-    const missing = mine ? Math.max(0, p.possible - p.known.length) : 0;
-    const chips = p.known.map(n => `<span class="aug">${esc(n)}${p.assumed.includes(n) ? " (assumed)" : ""}</span>`).join("")
-      + Array(missing).fill(`<span class="aug miss">not recorded</span>`).join("");
-    return `<div class="row"><img class="c" src="${champImg(p.champ_id)}" alt=""><span class="nm">${esc(p.champion)}</span><span class="augs">${chips || `<span class="dim">none yet at this level</span>`}</span></div>`;
-  };
-  const you = t.players.find(p => p.side === "you");
-  const others = t.players.filter(p => p.side !== "you" && p.known.length);
-  let h = `<h2>Your augments${you ? `: ${you.known.length} of up to ${you.possible}` : ""}</h2>`;
-  if (t.last && t.last.age < 15) h += `<p class="flash">Just read from the scoreboard: ${esc(t.last.name)} ${t.last.owner ? `for ${esc(t.last.owner)}` : "(could not tell whose it is)"}</p>`;
-  h += `<div class="team">${you ? row(you, true) : ""}${others.length ? `<h3>Other players</h3>` + others.map(p => row(p, false)).join("") : ""}</div>`;
-  if (t.unowned.length) h += `<p class="dim">Read but not matched to a player: ${esc(t.unowned.join(", "))}. Point at it again with the mouse on that player's row.</p>`;
-  if (you && you.assumed.length) h += `<p class="dim">"Assumed" means the coach recorded its own pick without seeing which card you took. To correct one, tap the card you took on the "Augment choice" card while it is showing.</p>`;
-  return h;
-}
-
-function deathsHtml(d) {
-  let h = `<h2>How you died</h2><p>${esc(d.last)}</p><p class="dim">This game: ${esc(d.line)}.</p>`;
-  if (d.rule) h += `<p class="pick" style="font-size:18px">${esc(d.rule)}</p>`;
-  return h;
-}
-
-function teamHtml(title, players) {
-  if (!players.length) return "";
-  return `<h3>${title}</h3>` + players.map(p =>
-    `<div class="row${p.dead ? " dead" : ""}"><img class="c" src="${champImg(p.champ_id)}" alt=""><span class="nm">${esc(p.champion)}</span><span class="kda">Lv ${p.level} · ${p.kda.join("/")}</span><span class="it">${p.items.map(i => `<img src="${itemImg(i.id)}" title="${esc(i.name)}" alt="">`).join("")}</span></div>`
-  ).join("");
 }
 
 function render(v) {
@@ -321,16 +246,8 @@ function render(v) {
   set("headline", a ? esc(a.headline) : "");
   $("buy").className = "card" + (v.buy_now && v.buy_now.shop_open ? " open" : "");
   set("buy", buyHtml(v));
-  const has = key => !!a && (a[key] || []).length > 0;
-  show("build", !!a); show("play", has("how_to_play")); show("duels", has("duels")); show("threats", has("threats"));
-  if (a) { set("build", buildHtml(v)); set("play", playHtml(v)); set("duels", duelsHtml(v)); set("threats", threatsHtml(v)); }
-  const scalingCard = a ? scalingHtml(v) : "";
-  show("scaling", !!scalingCard); set("scaling", scalingCard);
-  set("teams", `<h2>Scoreboard</h2><div class="team">${teamHtml("Enemies", v.teams.enemies)}${teamHtml("Your team", v.teams.allies)}</div>`);
-  show("deaths", !!v.deaths);
-  if (v.deaths) set("deaths", deathsHtml(v.deaths));
-  show("tracker", !!v.augment_tracker);
-  if (v.augment_tracker) set("tracker", trackerHtml(v.augment_tracker));
+  show("build", !!a); show("play", !!a && (a.how_to_play || []).length > 0);
+  if (a) { set("build", buildHtml(v)); set("play", playHtml(v)); }
   $("readscreen").textContent = `Read my screen (${v.hotkey})`;
 
   const m = v.meta;

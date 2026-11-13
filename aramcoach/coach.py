@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import deque
 
-from . import advisor, config, deaths, itemset, lcu, live, ocr, postgame, screen, shop
+from . import advisor, champfit, config, deaths, itemset, lcu, live, ocr, postgame, research, screen, shop
 from .log import log
 
 
@@ -20,6 +21,11 @@ def _fingerprint(state: dict) -> tuple:
     return tuple((p["level"], tuple(p["kda"]), tuple(sorted(str(i["id"]) for i in p["items"]))) for p in everyone if p)
 
 
+def _follow_up(name: str) -> bool:
+    """Whether a card only ever appears as a second choice: a stat shard or an ability upgrade."""
+    return name.strip().endswith("Shard") or name.strip().upper() in ("HEAVY", "POWER", "THRASH", "DOOM")
+
+
 class Coach:
     def __init__(self, sd, source):
         self.sd = sd
@@ -31,6 +37,7 @@ class Coach:
         self.pregame = None              # plan made before the match: {champ_id, advice, enemies_known}
         self.pregame_info = None         # what the panel shows while waiting
         self.champ_options = None        # champions on offer in champion select, ranked (see champfit.rank)
+        self._fit = champfit.load(sd) or {}   # each champion's job on a team, used to name a teammate to follow
         self.pre_cost, self.pre_calls = 0.0, 0
         self._loading_plan_at = 0.0      # when a loading-screen plan was requested and is not back yet
         self.item_set = None             # the in-game item set written in champion select: {champ_id, ids}
@@ -47,7 +54,8 @@ class Coach:
         self.advice_meta = {}
         self.error = None
         self.thinking = False
-        self.offers = []                 # augment offers seen this game: {names, pick, taken, assumed}
+        self.offers = []                 # augment offers seen this game: {names, pick, why, taken, assumed, time}
+        self.plans = []                  # every plan given this game: {time, trigger, build, changed, dropped}
         self._offer = None               # the offer on screen right now (an entry of self.offers)
         self._offer_misses = 0
         self._offer_candidate = None    # the cards read on the last scan, waiting for a second scan to agree
@@ -55,7 +63,8 @@ class Coach:
         self._death_at = 0.0             # when the player died, while the plan for that death is being held
         self._death_trigger = ""
         self.deaths = []                 # the player's deaths this game, as measured by deaths.record
-        self._alive_since = None         # game time the player last came back to life; None when not seen
+        self._health = deque(maxlen=40)  # (game time, share of health left) for the last seconds alive
+        self._death_shot_at = 0.0        # when to save a picture of the screen after a death; 0 when none is due
         self._hover_misses = 0
         self._start_misses = 0
         self.seen_augments = {}          # other players' augments read from scoreboard tooltips: {champion: [names]}
@@ -67,7 +76,10 @@ class Coach:
         self.screen_busy = False
         self._have_live_plan = False     # a plan made with the enemy team known
         self._awaiting_loading = 0.0     # set at match start while the loading-screen plan is still in flight
-        self._pending = None             # (trigger, urgent)
+        self._pending = None             # (trigger, urgent, fresh)
+        self._remake_owed = False        # an augment that matters was recorded while another choice was on screen
+        self._taken_out = {}             # items plans of this match took out of the build: {item id: {name, time, why}}
+        self.told = []                   # what the player typed to the coach this match: {time, text}
         self._last_request = 0.0
         self._retry_after = 0.0
         self._basis_big = set()
@@ -137,6 +149,7 @@ class Coach:
                 # match loaded first and waited, so the plan goes straight onto the panel now.
                 self.advice = advice
                 self.advice_meta = {"trigger": "made on the loading screen", "game_time": 0, "at": time.time()}
+                self._note_plan(advice, 0, "made on the loading screen")
                 self._have_live_plan = True
                 self._awaiting_loading = 0.0
                 self._last_request = time.time()
@@ -151,7 +164,8 @@ class Coach:
                 self.game_calls += 1
                 used = "late"
             log("pregame_plan", champion=champ_id, enemies_known=enemies_known, cost=cost, used=used,
-                build=[b["name"] for b in advice["build_order"]])
+                build=[b["name"] for b in advice["build_order"]], whys=[b["why"] for b in advice["build_order"]],
+                dropped=[d["name"] for d in advice.get("dropped") or []])
             return used
 
     def pregame_summary(self, champ_id: str) -> str:
@@ -209,19 +223,23 @@ class Coach:
             self._merge_seen_augments(state)
             state["my_augments"] = list(self.my_augments)
             state["assumed_augments"] = list(self.assumed_augments)
+            state["told"] = list(self.told)
             state["focus"] = (self.debrief or {}).get("focus_next_game")
             in_set = self._item_set_for(state)
             state["item_set"] = [self.sd.items[i]["name"] for i in in_set["ids"] if i in self.sd.items] if in_set else None
             self.status, self.state = "live", state
             me, was = state["me"], prev and prev["me"]
             died = bool(was and me and me["dead"] and not was["dead"])
-            if new_game:
-                self._alive_since = 0.0 if state["time"] < 60 else None      # None: joined a match already under way
-            elif was and me and was["dead"] and not me["dead"]:
-                self._alive_since = state["time"]
+            if me and not me["dead"] and me.get("health") is not None:
+                self._health.append((state["time"], me["health"]))
             if died:
-                self.deaths.append(deaths.record(state, self._alive_since,
+                # Health about ten seconds earlier says whether the player went into the fight already low.
+                earlier = [(abs(t - (state["time"] - 10)), h) for t, h in self._health
+                           if state["time"] - 14 <= t <= state["time"] - 6]
+                self.deaths.append(deaths.record(state, min(earlier)[1] if earlier else None,
                                                  after=self.deaths[-1]["time"] if self.deaths else -1.0))
+                if len(self.deaths) <= 8:
+                    self._death_shot_at = time.time() + 3.0
             state["deaths"] = self._death_summary(state)
             self._capture(raw, state, force=new_game or died)
             self._check_triggers(state, died)
@@ -231,8 +249,10 @@ class Coach:
         me = state["me"]
         if me is None or not self.deaths:
             return None
-        rows = [deaths.classify(d, state["kills"], me["team"], state["time"]) for d in self.deaths]
-        return deaths.summarize(rows, tank="Tank" in me["tags"])
+        rows = [deaths.classify(d, state["kills"], (me["team"], me["champion"]), state["time"]) for d in self.deaths]
+        job = lambda p: (self._fit.get(p["champ_id"]) or champfit.fallback(self.sd, p["champ_id"]))["job"]
+        lead = next((p["champion"] for p in state["allies"] if job(p) == "frontline"), "")
+        return deaths.summarize(rows, tank=job(me) == "frontline", lead=lead)
 
     def _game_over(self):
         """The match has ended: log it and start the post-game review in the background."""
@@ -243,7 +263,8 @@ class Coach:
         if self.source.capture and self.lcu_game_id:
             folder = config.CAPTURE_DIR / self.game_id
             threading.Thread(target=postgame.run, name="postgame", daemon=True,
-                             args=(self, self.sd, folder, self.lcu_game_id, self._plan_summary(), died)).start()
+                             args=(self, self.sd, folder, self.lcu_game_id, self._plan_summary(), died,
+                                   self._match_record())).start()
 
     def _adopt_pregame(self, state):
         """Start the match with the plan made in champion select or on the loading screen."""
@@ -251,6 +272,8 @@ class Coach:
         self.pre_cost, self.pre_calls = 0.0, 0
         pregame, self.pregame = self.pregame, None
         me = state["me"]
+        if me and me["champ_id"]:
+            research.ensure(self.sd, me["champ_id"])     # this champion's playbook, if the loading screen did not start it
         fresh = pregame and time.time() - pregame["at"] < 900
         adopted = bool(fresh and me and pregame["champ_id"] == me["champ_id"])
         log("game_start", game=self.game_id, champion=me and me["champion"], mode=state["mode"],
@@ -262,6 +285,8 @@ class Coach:
             return
         self.advice = pregame["advice"]
         self.advice_meta = {"trigger": "made before the match loaded", "game_time": 0, "at": time.time()}
+        self._note_plan(self.advice, 0, "made before the match loaded, "
+                        + ("with the enemy team known" if pregame["enemies_known"] else "in champion select"))
         if pregame["enemies_known"]:
             # The loading-screen plan already saw both teams, so no second plan is needed at spawn.
             self._have_live_plan = True
@@ -303,7 +328,7 @@ class Coach:
         if not self._have_live_plan:
             waiting = self._awaiting_loading and time.time() - self._awaiting_loading < 30
             if not waiting and not self.thinking and self._pending is None:
-                self.request("game start", urgent=True)
+                self.request("game start", urgent=True, fresh=True)
             return
         new = _big_items(state["enemies"]) - self._basis_big
         bought = ", ".join(f"{c} bought {i}" for c, i in sorted(new))
@@ -337,14 +362,20 @@ class Coach:
               and _fingerprint(state) != self._basis_print):
             self.request("periodic refresh")
 
-    def request(self, trigger: str, urgent: bool = False):
-        """Queue a plan update. Urgent requests skip the minimum interval."""
+    def request(self, trigger: str, urgent: bool = False, fresh: bool = False):
+        """Queue a plan update. Urgent requests skip the minimum interval.
+
+        fresh: remake the plan from what is known now instead of adjusting the last one. Used at
+          the start of a match and when the player's augments change, the two moments at which
+          what the build should be can change most. Several independent plans are made and
+          combined (see advisor.get_plan).
+        """
         with self.lock:
             if self._pending and self._pending[1] and not urgent:
                 return                       # an urgent request is already waiting; keep its reason
             if urgent:
                 self._retry_after = 0.0
-            self._pending = (trigger, urgent)
+            self._pending = (trigger, urgent, fresh or bool(self._pending and self._pending[2]))
         self.wake.set()
 
     def _advise_loop(self):
@@ -355,7 +386,7 @@ class Coach:
                 state = self.state
                 if not self._pending or state is None or state["me"] is None:
                     continue
-                trigger, urgent = self._pending
+                trigger, urgent, fresh = self._pending
                 now = time.time()
                 if not urgent and now - self._last_request < config.MIN_ADVICE_INTERVAL:
                     continue                 # checked again on the next one-second wake-up
@@ -365,7 +396,10 @@ class Coach:
                 self._basis_big = _big_items(state["enemies"])
                 self._basis_print = _fingerprint(state)
                 game_id = self.game_id
-                previous = self._plan_summary()
+                votes = config.PLAN_VOTES if fresh else 1
+                previous = self._plan_summary(for_plan=True)
+                in_force = self.advice if not self.advice_meta.get("partial") else None
+                replaced = in_force if votes > 1 else None
                 first_plan = self.advice is None
             base_meta = {"trigger": trigger, "game_time": state["time"]}
 
@@ -377,8 +411,19 @@ class Coach:
                         self.advice_meta = {**base_meta, "at": time.time(), "partial": True}
 
             try:
-                advice, meta = advisor.get_advice(self.sd, state, previous, trigger,
-                                                  on_partial=show_partial if first_plan else None)
+                advice, meta = advisor.get_plan(
+                    self.sd, state, previous, trigger, votes, on_partial=show_partial if first_plan else None,
+                    previous_build=[b["item_id"] for b in replaced["build_order"]] if replaced else ())
+                # The player may have shopped while Claude was answering: go by what they hold now.
+                latest = self.state if self.state is not None and self.state.get("me") else state
+                held = [i["id"] for i in latest["me"]["items"]]
+                # A remake from several plans, the first plan with the enemy team known, and a plan the player asked
+                # for may change the build freely. Any other must say what it changed.
+                free = (votes > 1 or trigger.startswith("game start") or "asked for a fresh plan" in trigger
+                        or trigger.startswith("the player typed"))
+                advice = advisor.steady(self.sd, in_force, advice, held, fresh=free)
+                if votes > 1:                # made without sight of the last plan, so the coach says what changed
+                    advice["changed"] = advisor.build_change(replaced, advice, set(held))
                 failure = None
             except Exception as exc:
                 advice, meta, failure = None, {}, str(exc)
@@ -389,10 +434,32 @@ class Coach:
                 log("plan", game=game_id, trigger=trigger, game_time=int(state["time"]), ok=bool(advice),
                     latency=meta.get("latency"), cost=meta.get("cost"), output_tokens=meta.get("output_tokens"),
                     cache_read=meta.get("cached_tokens"), error=failure,
-                    build=[b["name"] for b in advice["build_order"]] if advice else None)
+                    build=[b["name"] for b in advice["build_order"]] if advice else None,
+                    # The reason given for each item, and any item the item checks removed (see itemcheck).
+                    whys=[b["why"] for b in advice["build_order"]] if advice else None,
+                    dropped=[d["name"] for d in advice.get("dropped") or []] if advice else None,
+                    # What the plan said it changed, and what the coach held it to (see advisor.steady).
+                    changed=advice.get("changed") if advice else None, kept=advice.get("kept") if advice else None,
+                    # The build the plan asked for and its reason, when the coach showed a different one.
+                    proposed=advice.get("proposed") if advice else None,
+                    proposed_change=advice.get("proposed_change") if advice else None,
+                    # With several independent plans: how many, how many items most of them agreed on, and each build.
+                    votes=meta.get("votes"), agreed=meta.get("agreed"), builds=meta.get("builds"),
+                    # With calculations on offer: the seconds each answer took, and what was called (see tools.py).
+                    turns=meta.get("turns"), tool_calls=meta.get("tool_calls"))
                 if advice:
+                    if in_force:
+                        # Remember what this plan took out and why, for the plans after it (see advisor.plan_summary).
+                        now_in = {b["item_id"] for b in advice["build_order"]}
+                        for b in in_force["build_order"]:
+                            if b["item_id"] not in now_in and b["item_id"] not in held:
+                                self._taken_out[b["item_id"]] = {"name": b["name"], "time": int(state["time"]),
+                                                                 "why": (advice.get("changed") or "")[:200]}
+                        for item_id in now_in & set(self._taken_out):
+                            del self._taken_out[item_id]
                     self.advice = advice
                     self.advice_meta = {**meta, **base_meta, "at": time.time()}
+                    self._note_plan(advice, state["time"], trigger)
                     self.error = None
                     self._have_live_plan = True
                     self._spent(meta)
@@ -402,10 +469,38 @@ class Coach:
                     self.error = failure
                     self._retry_after = time.time() + config.RETRY_AFTER_ERROR
 
-    def _plan_summary(self) -> str:
+    def _plan_summary(self, for_plan: bool = False) -> str:
+        """The plan in force as text for the next request. A plan request also gets what earlier plans took out."""
         if not self.advice:
             return ""
-        return advisor.plan_summary(self.advice, self.advice_meta.get("game_time", 0))
+        return advisor.plan_summary(self.advice, self.advice_meta.get("game_time", 0),
+                                    list(self._taken_out.values()) if for_plan else ())
+
+    def _note_plan(self, advice: dict, game_time: float, trigger: str):
+        """Keep a plan for the post-game review, which checks the coach's advice against the result."""
+        self.plans.append({"time": int(game_time), "trigger": trigger, "changed": advice.get("changed") or "",
+                           "build": [b["name"] for b in advice["build_order"]],
+                           "dropped": [d["name"] for d in advice.get("dropped") or []],
+                           "proposed": advice.get("proposed"), "proposed_change": advice.get("proposed_change") or ""})
+
+    def _match_record(self) -> dict:
+        """What the coach did during this match, for the post-game review. Call with the lock held."""
+        state = self.state
+        me = state["me"] if state else None
+        rows = [deaths.classify(d, state["kills"], (me["team"], me["champion"]), state["time"])
+                for d in self.deaths] if me else []
+        return {
+            # Who the player was, in case the client cannot say which account is theirs after the match.
+            "me": {"champ_id": me["champ_id"], "team": me["team"]} if me else None,
+            "plans": list(self.plans),
+            "offers": [{"time": o.get("time"), "names": list(o["names"]), "pick": o["pick"], "why": o.get("why", ""),
+                        "taken": o["taken"], "assumed": o["assumed"]} for o in self.offers],
+            "death_rows": [{**{k: d[k] for k in ("time", "killer", "by", "health", "ours", "theirs",
+                                                 "started_with", "started_against")},
+                            "verdict": deaths.words(d["kind"])} for d in rows],
+            "focus": (self.debrief or {}).get("focus_next_game") or "",
+            "told": list(self.told),
+        }
 
     def _spent(self, meta: dict):
         self.game_cost += meta.get("cost") or 0.0
@@ -414,14 +509,27 @@ class Coach:
     # ---- questions, screen reads, augments --------------------------------
 
     def ask(self, question: str) -> str:
+        """Answer something the player typed, keep it for the rest of the match, and make the plan again with it.
+
+        Most of what the player types mid-match is about the build: an item they already own, an
+        item they do not want. One real message asked for no defensive items on a mage, the
+        answer argued, and the plan did not change. What they typed now reaches every later
+        request of the match as an instruction (see advisor.render_request).
+        """
         with self.lock:
-            state, previous = self.state, self._plan_summary()
-        if state is None or state["me"] is None:
-            return "No game is running, so there is nothing to answer about yet."
+            state, game_id = self.state, self.game_id
+            if state is None or state["me"] is None:
+                return "No game is running, so there is nothing to answer about yet."
+            self.told.append({"time": int(state["time"]), "text": " ".join(question.split())[:300]})
+            state["told"] = list(self.told)
+            previous = self._plan_summary()
         text, meta = advisor.answer_question(self.sd, state, previous, question)
-        log("question", question=question, latency=meta.get("latency"), cost=meta.get("cost"), answer=text)
+        log("question", game=game_id, game_time=int(state["time"]), question=question, latency=meta.get("latency"),
+            cost=meta.get("cost"), answer=text)
         with self.lock:
             self._spent(meta)
+            if game_id == self.game_id:
+                self.request(f"the player typed: {' '.join(question.split())[:120]}", urgent=True)
         return text
 
     def read_screen(self):
@@ -455,12 +563,43 @@ class Coach:
                 return
             self.screen_busy = False
             if result["kind"] == "augment_choice":
-                self.offers.append({"names": [o["name"] for o in result["offered"]], "pick": result["pick"],
-                                    "taken": None, "assumed": False})
+                self._note_picture_read(result, int(state["time"]))
             self.screen = {**result, "at": time.time(), "game_time": int(state["time"]),
                            "took": round(time.time() - started, 1)}
             if meta:
                 self._spent(meta)
+
+    def _note_picture_read(self, result: dict, game_time: int):
+        """Record an augment choice read from a picture. Call with the lock held.
+
+        The choice on screen usually has a record already, made by the local card reader. The
+        picture can show a card that reader missed. Before this, the picture got a second
+        record of its own, and one choice could then yield two augments: in a real match the
+        reader saw two cards and picked BEES!!!, the picture showed the third and picked it,
+        the player took that one, and the coach planned around both.
+        """
+        canon = lambda name: (self.sd.augment(name) or {}).get("name") or name
+        names = [canon(o["name"]) for o in result["offered"]]
+        pick = canon(result["pick"]) if result["pick"] else ""
+        result["pick"] = pick
+        for o in result["offered"]:
+            o["name"] = canon(o["name"])
+        episode = self._offer
+        if episode is None and self.offers and game_time - self.offers[-1]["time"] <= 45 \
+                and set(names) & set(self.offers[-1]["names"]):
+            episode = self.offers[-1]                # the same choice, read just after it closed
+        if episode is None:
+            self.offers.append({"names": names, "pick": pick, "why": result["why"], "taken": None, "assumed": False,
+                                "time": game_time})
+            return
+        episode["names"] = list(dict.fromkeys(names + episode["names"]))
+        episode["by_picture"] = True
+        if not episode["taken"] or episode["assumed"]:
+            episode["pick"], episode["why"] = pick, result["why"]
+        if episode["taken"] and episode["assumed"] and pick and episode["taken"] != pick:
+            # It closed on the earlier pick. The player has now been shown another: stop assuming either.
+            episode["taken"], episode["assumed"] = None, False
+            self._augments_changed("", replan=False)
 
     def capture_scoreboard(self):
         """Save a full-resolution screenshot while the scoreboard (Tab) is up. No Claude call.
@@ -492,6 +631,21 @@ class Coach:
                 time.sleep(5)
             time.sleep(0.7)
 
+    def _keep_death_shot(self, shot):
+        """Save what the screen shows a few seconds after a death, for the first deaths of a match.
+
+        The game API does not say which abilities killed the player; the game's own death
+        recap does. These pictures are kept to find out whether that recap is on screen
+        without a click, and so whether the coach could read it.
+        """
+        with self.lock:
+            if not self._death_shot_at or time.time() < self._death_shot_at or not self.source.capture:
+                return
+            self._death_shot_at = 0.0
+            folder, game_time = config.CAPTURE_DIR / self.game_id, int(self.state["time"])
+        folder.mkdir(parents=True, exist_ok=True)
+        shot.save(folder / f"death_t{game_time:05d}.png")
+
     def scan_for_offer(self):
         """Look at the screen once for an augment offer and react to what is there.
 
@@ -513,6 +667,7 @@ class Coach:
         if self._reader is None:
             self._reader = ocr.OfferReader(self.sd.augments_all())
         shot = screen.grab()
+        self._keep_death_shot(shot)
         offer = self._reader.find(shot)
         names = [a["name"] for a in offer]
         with self.lock:
@@ -522,21 +677,67 @@ class Coach:
                 self._offer_candidate = None
                 self._offer_closed_maybe()
                 return
+            if self._offer is not None and self._offer_misses:
+                # Scans that found no cards while this offer was open. Kept for the record: a card that is taken
+                # may clear the screen for a moment before the next choice, which a reroll never does.
+                self._offer["gap"] = max(self._offer.get("gap", 0), self._offer_misses)
             self._offer_misses = 0
+            if self._offer is not None:
+                self._offer["last_seen"] = names         # even one unconfirmed read: it shows a late reroll
             if names != self._offer_candidate:
                 self._offer_candidate, self._offer_partial = names, 0
+                if self._offer is not None and self._offer["names"] and names != self._offer["names"]:
+                    # Kept for the record: cards read once, between two sets that were read twice. A reroll changes
+                    # one card at a time, so these show whether three new cards came together or one by one.
+                    log("offer_glimpse", game=self.game_id, game_time=int(self.state["time"]), cards=names)
                 return                       # wait for a second scan to agree
             if len(names) < 3:
                 self._offer_partial += 1
                 if self._offer_partial < 3:
                     return                   # a third card may still be appearing
+            earlier = self._offer
+            if earlier is not None and earlier["names"] and not set(names) & set(earlier["names"]):
+                # Every card changed at once. That is one of two things, and the screen does not say which.
+                # A second choice: Mayhem follows some augments with another choice, with no gap between
+                # the two, so a card of the earlier one has been taken. Before this check the second
+                # choice replaced the first in the coach's record: two real games lost an augment that
+                # way (Infernal Conduit, Recursion). Or the player rerolled all three cards within a
+                # second or two, which this player does whenever all three look weak, and nothing has
+                # been taken. Read as a second choice, that put Celestial Body in the record of a match
+                # whose player never held it, and every plan after was built on it.
+                # What a reroll can and cannot do settles most cases. Each card has one reroll: in 103
+                # recorded choices no card changed twice. A rerolled card keeps its tier (76 of 78). Stat
+                # shards and ability upgrades appear only after a pick. So it is a second choice when
+                # the new cards are shards or upgrades, when a card of the earlier set had already been
+                # rerolled, or when the tier is a different one. Anything else is read as a reroll of all
+                # three. Of the 11 such moments with a pick and a post-game record to check against, that
+                # is right in 10. The miss is a second choice of the same tier with no reroll before it
+                # (one match), which leaves one augment unrecorded. Always reading a second choice was
+                # right in 9, and both misses were augments the player never held.
+                tiers = lambda cards: {t for t in ((self.sd.augment(n) or {}).get("tier") for n in cards) if t}
+                was, now = tiers(earlier["names"]), tiers(names)
+                second_choice = (all(_follow_up(n) for n in names) or earlier.get("rerolled", 0) > 0
+                                 or bool(was and now and not was & now))
+                if second_choice:
+                    # With no pick given yet, the card that was taken is not known and nothing is assumed.
+                    self._end_offer(earlier, replan=False)   # the plan waits for the choice now on screen
+                else:
+                    earlier["rerolled"] = 3
+                    log("offer_rerolled_whole", game=self.game_id, was=earlier["names"], now=names, pick=earlier["pick"],
+                        gap=earlier.get("gap", 0))
             if self._offer is None:
-                self._offer = {"names": [], "pick": "", "taken": None, "assumed": False, "answers": {}}
+                self._offer = {"names": [], "pick": "", "why": "", "taken": None, "assumed": False,
+                               "answers": {}, "time": int(self.state["time"])}
                 self.offers.append(self._offer)
             if names == self._offer["names"]:
                 return
+            if self._offer.get("by_picture") and set(names) <= set(self._offer["names"]):
+                return                       # a picture read these cards and one more that this reader cannot
             episode = self._offer            # a new offer, or a reroll changed the cards
-            episode["names"], episode["pick"] = names, ""
+            if len(names) == 3 and len(episode["names"]) == 3 and set(names) & set(episode["names"]):
+                # Count the cards rerolled in this choice: one that has been rerolled cannot change again.
+                episode["rerolled"] = episode.get("rerolled", 0) + sum(a != b for a, b in zip(episode["names"], names))
+            episode["names"], episode["pick"], episode["why"] = names, "", ""
             hoped_for = ((self.advice or {}).get("scaling") or {}).get("augments_to_look_for") or []
             wanted = [n for n in names if any(n.lower() in w.lower() for w in hoped_for)]
             self.screen = {
@@ -547,7 +748,7 @@ class Coach:
             log("offer_seen", game=self.game_id, game_time=int(self.state["time"]), offered=names, wanted=wanted)
             known = episode["answers"].get(tuple(names))
             if known:                        # the cards went back to a set already answered
-                episode["pick"] = known["pick"]
+                episode["pick"], episode["why"] = known["pick"], known["why"]
                 self.screen.update(known, choosing=False)
                 return
             args = (episode, offer, names, self.state, self._plan_summary(), self.game_id, shot)
@@ -559,7 +760,7 @@ class Coach:
         by_picture = shot is not None and config.BACKEND == "api" and any(not a["description"] for a in offer)
         try:
             if by_picture:
-                seen, meta = advisor.read_screen(self.sd, state, previous, screen.to_jpeg(shot))
+                seen, meta = advisor.read_screen(self.sd, state, previous, screen.to_jpeg(shot), names)
                 on_offer = {ocr.fold(n): n for n in names}
                 result = {"pick": on_offer.get(ocr.fold(seen["pick"]), seen["pick"]), "why": seen["why"],
                           "reroll": "", "note": seen["note"]}
@@ -579,7 +780,7 @@ class Coach:
                 episode["answers"][tuple(names)] = result
             if episode["names"] != names:
                 return                       # the cards changed while Claude was answering
-            episode["pick"] = result["pick"]
+            episode["pick"], episode["why"] = result["pick"], result["why"]
             if self.screen and self.screen.get("kind") == "augment_choice":
                 self.screen.update(result, choosing=False, took=meta.get("latency"))
 
@@ -710,17 +911,53 @@ class Coach:
         self._offer_misses += 1
         if self._offer_misses < 3:
             return
+        self._end_offer(episode)
+
+    def _end_offer(self, episode, replan: bool = True):
+        """An offer is over. Call with the lock held.
+
+        replan: ask for a new plan. False when another choice is already on screen: the plan made
+          when that one closes covers both.
+        """
         self._offer = None
-        log("offer_closed", game=self.game_id, offered=episode["names"], pick=episode["pick"], taken=episode["taken"])
+        log("offer_closed", game=self.game_id, offered=episode["names"], pick=episode["pick"], taken=episode["taken"],
+            followed_by_another=not replan, rerolled=episode.get("rerolled", 0), gap=episode.get("gap", 0))
+        # A reroll replaces one card or two. When every card is different, that is the next choice
+        # (a stat shard follows some augments at once), and this one was made before it appeared.
+        last = episode.get("last_seen") or []
+        late = [n for n in last if n not in episode["names"]] if set(last) & set(episode["names"]) else []
+        if episode["pick"] and not episode["taken"] and late:
+            # A card appeared after the pick was made, too late for a new pick. The player rerolled and
+            # may have taken the new card. In a real match that happened twice, the coach assumed its
+            # own pick both times, and planned around two augments the player did not hold. Say so
+            # and let the player tap what they took. Nothing is assumed and the build stays as it is.
+            log("offer_changed_late", game=self.game_id, pick=episode["pick"], late=late)
+            episode["names"] = list(dict.fromkeys(late + episode["names"]))
+            if self.screen and self.screen.get("kind") == "augment_choice":
+                cards = [self.sd.augment(n) or {"name": n, "tier": "", "description": ""} for n in episode["names"]]
+                self.screen.update(
+                    pick="", why="", reroll="", choosing=False,
+                    note="The cards changed after my pick, so I do not know which one you took. Tap it here.",
+                    offered=[{"name": a["name"], "tier": a["tier"], "summary": a["description"][:240]} for a in cards])
+            if replan and self._remake_owed:     # the choice before this one still has its plan to come
+                self._remake_owed = False
+                self.request("the player's augments changed", urgent=True, fresh=True)
+            return
         if episode["pick"] and not episode["taken"]:
             # The player cannot be seen choosing. The coach gave a pick and was not corrected, so
             # assume they took it, mark it as assumed, and let a tap on the panel correct it.
             episode["taken"], episode["assumed"] = episode["pick"], True
             self._augments_changed(
-                f"the player probably took the augment {episode['pick']} (the coach's pick, not confirmed)")
+                f"the player probably took the augment {episode['pick']} (the coach's pick, not confirmed)", replan,
+                augment=episode["pick"])
 
-    def _augments_changed(self, reason: str):
-        """Rebuild the taken-augment lists from the offers and refresh the plan. Call with the lock held."""
+    def _augments_changed(self, reason: str, replan: bool = True, augment: str = ""):
+        """Rebuild the taken-augment lists from the offers and refresh the plan. Call with the lock held.
+
+        augment: the augment that was added. The build is remade from several fresh plans only
+        when it matters on this champion (see research.matters). Otherwise the next plan is an
+        ordinary one, which knows of the augment and keeps the build unless it says why not.
+        """
         taken = [o for o in self.offers if o["taken"]]
         self.my_augments = [o["taken"] for o in taken]
         self.assumed_augments = [o["taken"] for o in taken if o["assumed"]]
@@ -730,10 +967,16 @@ class Coach:
         if self.screen and self.screen.get("kind") == "augment_choice" and self.offers:
             self.screen["taken"] = self.offers[-1]["taken"]
             self.screen["assumed"] = self.offers[-1]["assumed"]
+        me = self.state["me"] if self.state else None
+        matters = bool(augment) and research.matters(self.sd, me and me["champ_id"], augment)
+        if not replan:
+            self._remake_owed = self._remake_owed or matters     # the plan comes when the choice now on screen closes
+            return
         if self._death_at:                   # this plan also serves as the plan for the death that was held
             self._death_at = 0.0
             reason += "; the player is dead and the shop is open"
-        self.request(reason, urgent=True)
+        remake, self._remake_owed = matters or self._remake_owed or not augment, False
+        self.request(reason, urgent=True, fresh=remake)
 
     def took_augment(self, name: str):
         """Record an augment the player says they took. It replaces an assumed one from the same offer."""
@@ -742,14 +985,25 @@ class Coach:
             if not name or self.state is None:
                 return
             episode = next((o for o in reversed(self.offers) if name in o["names"]), None)
-            if episode is None:
-                episode = {"names": [name], "pick": "", "taken": None, "assumed": False}
+            unknown = episode is None
+            if unknown:
+                episode = {"names": [name], "pick": "", "taken": None, "assumed": False,
+                           "time": int(self.state["time"])}
                 self.offers.append(episode)
             if episode["taken"] == name and not episode["assumed"]:
                 return
             episode["taken"], episode["assumed"] = name, False
+            # One choice gives one augment. An assumption made for the same choice is withdrawn: under a
+            # second record of it (the record next to this one, sharing a card), or, when the player names
+            # a card the coach never read, the choice that closed just before.
+            at = self.offers.index(episode)
+            for other in self.offers[max(0, at - 1): at + 2]:
+                same = unknown or set(other["names"]) & set(episode["names"])
+                if other is not episode and other["taken"] and other["assumed"] and same                         and abs(other["time"] - episode["time"]) <= 60:
+                    log("augment_withdrawn", game=self.game_id, name=other["taken"], instead=name)
+                    other["taken"], other["assumed"] = None, False
             log("augment_taken", game=self.game_id, name=name)
-            self._augments_changed(f"the player took the augment {name}")
+            self._augments_changed(f"the player took the augment {name}", augment=name)
 
     # ---- panel view ------------------------------------------------------
 
@@ -808,8 +1062,7 @@ class Coach:
                               "in_set": b["item_id"] in in_set["ids"] if in_set else None}
                              for b, s in zip(advice["build_order"], buy["statuses"])]
             view["advice"] = {k: advice.get(k) for k in
-                              ("headline", "next_item_why", "how_to_play", "threats", "duels", "scaling",
-                               "skill_order", "changed")}
+                              ("headline", "next_item_why", "how_to_play", "scaling", "skill_order", "changed")}
             meta = self.advice_meta
             view["meta"] = {"trigger": meta.get("trigger"), "age": int(time.time() - meta.get("at", time.time())),
                             "latency": meta.get("latency"), "game_time": int(meta.get("game_time", 0)),

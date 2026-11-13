@@ -13,7 +13,7 @@ import time
 
 import json
 
-from . import advisor, champfit, config, itemset, lcu, live
+from . import advisor, augtext, champfit, config, itemset, lcu, live, research
 from .log import log
 
 ARAM_MAP = 12
@@ -38,6 +38,8 @@ class Pregame:
     def start(self):
         itemset.clear()            # a set left by an earlier run would show for the wrong champion
         champfit.ensure(self.sd)   # rate every champion for this player, once, ahead of champion select
+        augtext.prepare(self.sd)   # effect text for the few augments the wiki table leaves out
+        research.ensure(self.sd)   # the augment map, when none has been written
         threading.Thread(target=self._loop, name="pregame", daemon=True).start()
 
     def _loop(self):
@@ -55,6 +57,8 @@ class Pregame:
             return
         phase, previous_phase = lcu.phase(), self._phase
         self._phase = phase
+        if phase is not None:
+            champfit.ensure(self.sd)         # player.txt may have been edited since the ratings were written
         if phase != previous_phase:
             log("client_phase", phase=phase)
         if phase is not None and not self._history_read:
@@ -146,11 +150,17 @@ class Pregame:
                                    queue.get("description") or live.MODE_LABELS.get(queue.get("mode"), "ARAM"))
         state["focus"] = (self.coach.debrief or {}).get("focus_next_game")
         self.coach.set_pregame_info({"champion": name, "champ_id": champ_id, "status": "planning"})
+        if enemies_known:
+            # The champion is final on the loading screen. In champion select it can still change through
+            # rerolls and swaps, and a playbook for a champion given away would be paid for and not used.
+            research.ensure(sd, champ_id)    # write this champion's playbook in the background when there is none
         try:
             if enemies_known:
                 previous = self.coach.pregame_summary(champ_id)
                 self.coach.loading_plan_started()    # the match can load before this returns; the coach waits for it
-                advice, meta = advisor.get_advice(sd, state, previous, "loading screen: the enemy team is now known")
+                # The first plan made with both teams known: several independent plans, combined.
+                advice, meta = advisor.get_plan(sd, state, previous, "loading screen: the enemy team is now known",
+                                                config.PLAN_VOTES)
             else:
                 advice, meta = advisor.get_pregame(sd, state)
         except Exception as exc:

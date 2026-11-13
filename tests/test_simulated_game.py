@@ -67,7 +67,7 @@ class StubClaude:
     def kinds(self):
         return [p.split("\n", 1)[0].split(" (")[0].replace("REQUEST: ", "") for p in self.prompts]
 
-    def run(self, system_file, prompt, on_text=None, image=None):
+    def run(self, system_file, prompt, on_text=None, image=None, effort=None, on_start=None):
         self.prompts.append(prompt)
         kind = prompt.split("\n", 1)[0]
         if self.gate is not None and kind.startswith("REQUEST: plan"):
@@ -77,10 +77,10 @@ class StubClaude:
             "build_order": [{"item_id": 3047, "name": "Plated Steelcaps", "why": "armor"},
                             {"item_id": 3075, "name": "Thornmail", "why": "reflects his hits"},
                             {"item_id": 3190, "name": "Locket of the Iron Solari", "why": "shield"}],
-            "next_item_why": "He deals physical damage.", "how_to_play": ["Hook him after his spin ends."],
-            "threats": [{"champion": "Garen", "danger": "spins", "answer": "walk away"}],
-            "duels": [{"champion": "Garen", "verdict": "avoid", "fight_when": "below about 40% health", "why": "ahead"}],
-            "scaling": {"goal": "A wall he cannot kill.", "power_spikes": ["Thornmail finished."],
+            "next_item_why": "He deals physical damage.",
+            "how_to_play": ["Hook him after his spin ends.", "Stand in front of your carry.", "", "Walk away from his spin.",
+                            "A fourth line the panel has no room for."],
+            "scaling": {"goal": "A wall he cannot kill.",
                         "combo": {"name": "Health wall", "have": ["Heavy Hitter"],
                                   "next": ["Thornmail: reflects his hits", "", 7, "an augment that scales with health",
                                            "a third piece", "a fourth piece"]},
@@ -88,7 +88,7 @@ class StubClaude:
             "skill_order": "Q first.", "changed": "",
         }
         if kind.startswith("REQUEST: pregame"):
-            answer = json.dumps({**plan, "threats": [], "duels": [], "title": "Tank Thresh",
+            answer = json.dumps({**plan, "title": "Tank Thresh",
                                  "situational": [{"title": "If they heal a lot", "item_ids": [3075, 999999]}],
                                  "augment_builds": [{"title": "If an augment adds crit", "item_ids": [3031, 999997]},
                                                     {"title": "", "item_ids": [3065]}, "not a group"],
@@ -104,6 +104,8 @@ class StubClaude:
             assert image is None, "an offer read locally must not send an image"
             answer = json.dumps({"pick": "Recursion", "why": "More casts of your hook.", "reroll": "", "note": ""})
         elif kind.startswith("REQUEST: debrief"):
+            assert effort == config.DEBRIEF_EFFORT, "the review reasons at its own, higher effort"
+            self.debrief_request = prompt
             answer = json.dumps({"verdict": "A hard loss to a stronger duelist.", "went_well": ["You built armor."],
                                  "to_fix": ["Four deaths."], "build_review": "Armor was right.",
                                  "focus_next_game": "Fight near your turret."})
@@ -140,6 +142,9 @@ def main():
     client.install()
     claude = StubClaude()
     llm.run = claude.run
+    config.PLAN_VOTES = 1
+    config.AUGMENT_TEXT = False                  # this test must not reach the network
+    config.RESEARCH = "0"                        # nor use research saved on this machine, nor pay for any
     screen.grab = lambda: Image.new("RGB", (640, 360), (40, 60, 90))
     set_file = work / "league" / "Config" / "Global" / "Recommended" / itemset.FILE_NAME
 
@@ -205,6 +210,10 @@ def main():
     view = coach.view()
     assert view["status"] == "live" and view["me"]["champion"] == "Thresh" and view["game"]["mode"] == "ARAM: Mayhem"
     assert view["advice"]["headline"] == "Stack armor and outlast Garen."
+    assert view["advice"]["how_to_play"] == ["Hook him after his spin ends.", "Stand in front of your carry.",
+                                             "Walk away from his spin."], "the panel has room for three instructions"
+    assert set(view["advice"]) == {"headline", "next_item_why", "how_to_play", "scaling", "skill_order", "changed"}
+    assert set(view["advice"]["scaling"]) == {"goal", "combo", "augments_to_look_for"}
     assert view["advice"]["scaling"]["combo"] == {
         "name": "Health wall", "have": ["Heavy Hitter"],
         "next": ["Thornmail: reflects his hits", "an augment that scales with health", "a third piece"]}, \
@@ -239,8 +248,9 @@ def main():
     last_plan_prompt = next(p for p in reversed(claude.prompts) if p.startswith("REQUEST: plan"))
     assert "WHO HAS KILLED YOU THIS GAME: Garen" in last_plan_prompt
     died = coach.view()["deaths"]
-    assert died["count"] >= 3 and died["outnumbered"] == 0, f"one against one is never outnumbered: {died}"
-    assert died["line"].startswith(f"{died['count']} deaths") and died["last"].startswith("You ")
+    assert died["count"] >= 3 and died["short"] == 0 and died["alone"] == 0, f"one against one: {died}"
+    assert died["picked"] + died["trade"] + died["pending"] == died["count"], "against one enemy, a death is a duel"
+    assert died["line"].startswith(f"{died['count']} deaths") and died["last"]
     assert "HOW YOU DIED THIS GAME (measured): " in last_plan_prompt
     assert "items in your in-game item set: " in last_plan_prompt and "Spirit Visage" in last_plan_prompt
     assert all(b["in_set"] is True for b in coach.view()["build"]), "every item of this plan is in the set"
@@ -373,6 +383,100 @@ def main():
     assert "the player is dead and the shop is open" in claude.prompts[-1].split("\n", 1)[0]
     assert len(claude.prompts) == before + 1, "one plan, not one for the death and one for the augment"
 
+    # 7e2. Mayhem follows some augments with a second choice, a stat shard or an ability upgrade, with no gap
+    #      between the two. All three cards change at once, which a reroll never does. The first choice must be
+    #      recorded as taken, not replaced by the second: two real games lost an augment that way.
+    screen.grab = lambda: offer_frame
+    coach.scan_for_offer(); coach.scan_for_offer()
+    wait_for(lambda: coach._offer is not None and coach._offer["pick"] == "Recursion", "the pick before a second choice")
+    held, before = list(coach.view()["my_augments"]), len(claude.prompts)
+    screen.grab = lambda: shard_frame
+    coach.scan_for_offer(); coach.scan_for_offer()
+    assert coach.view()["my_augments"] == held + ["Recursion"], "the augment picked before the shard must be kept"
+    assert coach._offer is not None and coach._offer["names"] == ["Swiftness Shard", "Health Shard", "Armor Shard"]
+    assert "plan" not in claude.kinds()[before:], "no plan between the two choices"
+    wait_for(lambda: coach._offer is not None and coach._offer["pick"], "the pick for the shard that followed")
+    screen.grab = lambda: Image.new("RGB", (1920, 1080), (30, 40, 35))
+    before = len(claude.prompts)
+    config.PLAN_VOTES = 3                        # new augments: the plan is remade from three independent answers
+    for _ in range(3):
+        coach.scan_for_offer()
+    wait_for(lambda: len(claude.prompts) >= before + 3 and not coach.thinking, "the remade plan after both choices")
+    config.PLAN_VOTES = 1
+    assert coach.view()["my_augments"][-2] == "Recursion" and len(coach.view()["my_augments"]) == len(held) + 2
+    remade = claude.prompts[before:]
+    assert [p.split("\n", 1)[0].startswith("REQUEST: plan") for p in remade] == [True] * 3, "three plans, asked for together"
+    assert all("YOUR PREVIOUS PLAN" not in p for p in remade), "a remade plan must not lean on the one it replaces"
+    assert all("your augment (assumed: it was your pick and the player did not say otherwise): Recursion" in p for p in remade)
+    assert coach.advice_meta.get("votes") == 3 and coach.view()["advice"]["changed"] == "", "three equal answers change nothing"
+
+    # 7e3. The player rerolls a card and takes the new one at once. One scan sees the new card, too late for a
+    #      pick. The coach must not assume its own pick: a real match ended with two augments in its record
+    #      that the player never held. It says it does not know, and the player's tap settles it.
+    def cards(*titles):
+        frame = Image.new("RGB", (1920, 1080), (14, 26, 34))
+        pen = ImageDraw.Draw(frame)
+        for centre, title in zip((592, 960, 1328), titles):
+            pen.rectangle((centre - 160, 150, centre + 160, 760), fill=(8, 18, 26), outline=(200, 180, 140), width=3)
+            face = ImageFont.truetype("C:/Windows/Fonts/georgiab.ttf", 24)
+            pen.text((centre - pen.textlength(title, font=face) / 2, 450), title, font=face, fill=(240, 230, 210))
+        return frame
+
+    empty = Image.new("RGB", (1920, 1080), (30, 40, 35))
+    wait_for(lambda: coach._pending is None and not coach.thinking, "settle before the late reroll")
+    screen.grab = lambda: offer_frame
+    coach.scan_for_offer(); coach.scan_for_offer()
+    wait_for(lambda: coach._offer is not None and coach._offer["pick"] == "Recursion", "the pick before a late reroll")
+    held, before = list(coach.view()["my_augments"]), len(claude.prompts)
+    late_frame = cards("Growth Spurt", "Dawnbringer's Resolve", "Goliath")
+    screen.grab = lambda: late_frame
+    coach.scan_for_offer()                       # seen once: the player takes the new card straight away
+    screen.grab = lambda: empty
+    for _ in range(3):
+        coach.scan_for_offer()
+    shown = coach.view()["screen"]
+    assert coach.view()["my_augments"] == held, "nothing is assumed when a card changed after the pick"
+    assert "Goliath" in [o["name"] for o in shown["offered"]] and "cards changed" in shown["note"] and not shown["pick"]
+    time.sleep(0.4)
+    assert len(claude.prompts) == before, "no plan for an augment the coach does not know"
+    coach.took_augment("Goliath")
+    wait_for(lambda: len(claude.prompts) > before and not coach.thinking, "the plan once the player says what they took")
+    assert coach.view()["my_augments"] == held + ["Goliath"] and "Goliath" not in coach.view()["assumed_augments"]
+
+    # 7e4. The local reader misses a card and a picture read finds it. That is one choice, not two: a real match
+    #      recorded BEES!!! from the two cards and Take'em Down Down Down from the picture, and planned around both.
+    two_cards = cards("Growth Spurt", "Recursion")
+    screen.grab = lambda: two_cards
+    for _ in range(5):
+        coach.scan_for_offer()
+    wait_for(lambda: coach._offer is not None and coach._offer["pick"] == "Recursion", "the pick from two cards")
+    held, records = list(coach.view()["my_augments"]), len(coach.offers)
+    coach.read_screen()
+    wait_for(lambda: coach._offer is not None and coach._offer["pick"] == "Heavy Hitter", "the picture's pick joins the offer")
+    assert len(coach.offers) == records, "the picture read must not open a second record of the same choice"
+    coach.scan_for_offer(); coach.scan_for_offer()
+    assert coach._offer["pick"] == "Heavy Hitter", "reading the same two cards again must not bring the old pick back"
+    screen.grab = lambda: empty
+    for _ in range(3):
+        coach.scan_for_offer()
+    assert coach.view()["my_augments"] == held + ["Heavy Hitter"], coach.view()["my_augments"]
+    wait_for(lambda: coach._pending is None and not coach.thinking, "the plan after the picture's pick")
+    coach.took_augment("Recursion")              # the player took another card of that choice
+    assert coach.view()["my_augments"] == held + ["Recursion"], "a tap replaces the assumption for that choice"
+    wait_for(lambda: coach._pending is None and not coach.thinking, "the plan after the tap")
+    # A tap on a card the coach never read corrects the choice that just closed.
+    screen.grab = lambda: offer_frame
+    coach.scan_for_offer(); coach.scan_for_offer()
+    wait_for(lambda: coach._offer is not None and coach._offer["pick"] == "Recursion", "one more offer")
+    screen.grab = lambda: empty
+    held = list(coach.view()["my_augments"])
+    for _ in range(3):
+        coach.scan_for_offer()
+    assert coach.view()["my_augments"] == held + ["Recursion"]
+    coach.took_augment("Zealot")
+    assert coach.view()["my_augments"] == held + ["Zealot"], "the assumed pick is withdrawn, not kept beside the real one"
+    wait_for(lambda: coach._pending is None and not coach.thinking, "the plan after the correction of an unread card")
+
     # 7f. A first snapshot that does not name the player is treated as still loading, not as a match.
     blank = json.loads(snapshots[5].read_text(encoding="utf-8"))
     for key in ("riotId", "riotIdGameName", "summonerName"):
@@ -381,6 +485,46 @@ def main():
     probe._on_snapshot(blank, "live")
     assert probe.view()["status"] == "loading" and probe.game_id is None
     assert list((config.CAPTURE_DIR / coach.game_id).glob("hover_t*.png")), "the first hover pictures should be kept"
+
+    # 7g. All three cards change at once. Either the player took a card and a second choice followed, or they
+    #     rerolled all three within a second, which this player does when all three look weak. A real match
+    #     recorded Celestial Body the second way, and every plan after it was built on an augment the player
+    #     never held. Each card has one reroll and a rerolled card keeps its tier, and that tells most cases apart.
+    def first_choice():
+        probe = Coach(sd, NoSource())
+        probe._on_snapshot(json.loads(snapshots[2].read_text(encoding="utf-8")), "live")
+        assert probe.view()["status"] == "live" and probe.view()["my_augments"] == []
+        screen.grab = lambda: offer_frame        # three Gold cards; the stand-in for Claude picks Recursion
+        probe.scan_for_offer(); probe.scan_for_offer()
+        wait_for(lambda: probe._offer is not None and probe._offer["pick"] == "Recursion", "the pick at a first choice")
+        return probe
+
+    def show(probe, frame):
+        screen.grab = lambda: frame
+        probe.scan_for_offer(); probe.scan_for_offer()
+
+    gold_set = cards("Celestial Body", "Soul Siphon", "Pinball")
+    fresh = first_choice()                       # three new cards of the same tier, nothing rerolled before: a reroll
+    show(fresh, gold_set)
+    assert fresh.view()["my_augments"] == [], "a reroll of all three cards must not record the earlier pick"
+    assert len(fresh.offers) == 1 and fresh._offer["names"] == ["Celestial Body", "Soul Siphon", "Pinball"], fresh.offers
+    assert "offer_rerolled_whole" in events()
+    time.sleep(0.5)                              # the stand-in names a card this set lacks, so no pick arrives
+    show(fresh, shard_frame)                     # a card was taken before the coach had a pick: not known, not guessed
+    assert fresh.view()["my_augments"] == [] and len(fresh.offers) == 2
+    other = first_choice()                       # a different tier: a reroll keeps the tier, so this is a second choice
+    show(other, cards("Zealot", "Heavy Hitter", "Deft"))
+    assert other.view()["my_augments"] == ["Recursion"], "new cards of another tier mean the pick was taken"
+    third = first_choice()                       # one card rerolled, then all three change: that card had no reroll left
+    show(third, cards("Shrink Ray", "Dawnbringer's Resolve", "Recursion"))
+    wait_for(lambda: third._offer is not None and third._offer["pick"] == "Recursion", "the pick after one reroll")
+    assert third._offer["rerolled"] == 1 and third.view()["my_augments"] == []
+    show(third, gold_set)
+    assert third.view()["my_augments"] == ["Recursion"], "a card cannot be rerolled twice, so the pick was taken"
+    fourth = first_choice()                      # stat shards only ever follow a pick
+    show(fourth, shard_frame)
+    assert fourth.view()["my_augments"] == ["Recursion"]
+    screen.grab = lambda: empty                  # these coaches have no plan thread: leave them here
 
     # 8. The match ends: the post-game record is saved and reviewed, and the item set is removed.
     game_folder = config.CAPTURE_DIR / coach.game_id
@@ -397,6 +541,11 @@ def main():
         advisor.render_debrief(saved, "", died), "the review request must state the measured deaths"
     assert len(saved["players"]) == 2 and sum(p["me"] for p in saved["players"]) == 1
     assert (game_folder / "debrief.json").exists()
+    # The review is written from everything the coach recorded, its own advice included.
+    asked = claude.debrief_request
+    for part in ("WHAT THE COACH ADVISED DURING THE MATCH:", "augment offer:", "WHEN EACH FINISHED ITEM WAS FIRST SEEN",
+                 "ITEM CHECKS FOR THE PLAYER'S CHAMPION", "CHAMPION NOTES:", "in on "):
+        assert part in asked, f"the review request is missing: {part}"
     assert (game_folder / "timeline.json").exists(), "the match's kill timeline should be kept"
     pre._tick()                                # the client still says InProgress for a moment
     assert set_file.exists()

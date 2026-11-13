@@ -4,6 +4,7 @@ Each named setting is read from the environment first, then from the `.env` file
 project folder (one NAME=value per line).
 """
 import os
+import re
 from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
@@ -48,6 +49,22 @@ def player_profile() -> str:
     return text[:2000] or _DEFAULT_PLAYER
 
 
+def presses_item_buttons() -> bool:
+    """Whether the player uses item buttons, the effects activated with a number key.
+
+    False makes the coach refuse items that do nothing without their button (see itemcheck).
+    ARAMCOACH_ITEM_BUTTONS=yes or no decides it. Left unset, it is read from the profile: a
+    sentence that mentions item buttons together with "never", "not" or "don't" means no.
+    """
+    override = _setting("ARAMCOACH_ITEM_BUTTONS").lower()
+    if override in ("yes", "no"):
+        return override == "yes"
+    for sentence in re.split(r"[.\n]", player_profile().lower()):
+        if "item button" in sentence and re.search(r"\b(never|not|don't|dont|no)\b", sentence):
+            return False
+    return True
+
+
 WEB_DIR = PKG_DIR / "web"
 
 # The game serves this on loopback only while a match is running.
@@ -61,9 +78,39 @@ PORT = int(_setting("ARAMCOACH_PORT", "8777"))
 API_KEY = _setting("ANTHROPIC_API_KEY")
 BACKEND = _setting("ARAMCOACH_BACKEND") or ("api" if API_KEY else "cli")   # api | cli
 
+# Optional. With a Riot developer key the coach can read Riot's own record of a finished match,
+# which lists the abilities that did the damage in every death. The game's local data does not.
+RIOT_API_KEY = _setting("RIOT_API_KEY")
+
 MODEL = _setting("ARAMCOACH_MODEL", "claude-opus-5-5")
 # Effort trades answer speed for depth: low | medium | high | xhigh | max.
 EFFORT = _setting("ARAMCOACH_EFFORT", "low")
+# Effect text for the few augments the wiki table leaves out is read from arammayhem.com (see augtext.py).
+# Nothing about how often players pick anything is read. 0 never contacts the site.
+AUGMENT_TEXT = _setting("ARAMCOACH_AUGMENT_TEXT", "1") != "0"
+# Research prepared ahead of a match (see research.py): what each augment multiplies with, and a playbook of
+# combinations per champion. 1 uses what is saved and writes a playbook when a champion without one is picked;
+# "saved" uses what is saved and never pays for more; 0 uses none.
+# Off unless switched on. It ran by default for one day, 2026-11-11, and in two real matches its text put an
+# item in the build that the player's situation did not support (Imperial Mandate on Sona, Blade of The Ruined
+# King on a front-line Volibear). The causes found were fixed, but only single requests were checked, not whole
+# matches. It stays off until tests/replay_match.py shows it does no harm over recorded matches.
+RESEARCH = _setting("ARAMCOACH_RESEARCH", "0").lower()
+RESEARCH_EFFORT = _setting("ARAMCOACH_RESEARCH_EFFORT", "high")
+# At the start of a match and after each augment the coach makes this many independent plans at once and
+# combines them (see advisor.consensus). Asked the same thing eight times, Claude agreed with itself on the
+# core of a build and on the next item, and not on the last two slots. 1 turns it off.
+# Off (1) unless raised. With 3 it ran for one day: every augment remade the build from plans that had not seen
+# the plan in force, five times in one 13-minute match, and the player's next item changed three times.
+PLAN_VOTES = max(1, int(_setting("ARAMCOACH_PLAN_VOTES", "1")))
+# Calculations Claude can call while it makes a plan (see tools.py): basic-attack damage, ability numbers and
+# survival for candidate builds, and formulas of its own, each worked out on the player's real stats. "plan"
+# offers them to plan requests; 0 offers none. API backend only. A plan that calls them waits for one more
+# answer from Claude. Off unless switched on, like everything that can change a plan: see the README for what
+# the replays over recorded matches showed.
+TOOLS = _setting("ARAMCOACH_TOOLS", "0").lower()
+# The post-game review is not read on a death timer, so it reasons at a higher effort.
+DEBRIEF_EFFORT = _setting("ARAMCOACH_DEBRIEF_EFFORT", "high")
 # "fast" runs the same model at higher output speed for twice the price (API backend only).
 SPEED = _setting("ARAMCOACH_SPEED", "standard")          # standard | fast
 # Key that makes the coach read the game screen (augment choices). F1 to F12.
